@@ -7535,6 +7535,13 @@ spdk_blob_set_xattr(struct spdk_blob *blob, const char *name, const void *value,
 	return blob_set_xattr(blob, name, value, value_len, false);
 }
 
+int
+spdk_blob_set_internal_xattr(struct spdk_blob *blob, const char *name, const void *value,
+		    uint16_t value_len)
+{
+	return blob_set_xattr(blob, name, value, value_len, true);
+}
+
 static int
 blob_remove_xattr(struct spdk_blob *blob, const char *name, bool internal)
 {

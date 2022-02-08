@@ -1720,6 +1720,15 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('-l', '--lvs-name', help='lvol store name', required=False)
     p.set_defaults(func=bdev_lvol_get_lvstores)
 
+    def lvol_show_blobs(args):
+        rpc.bdev.lvol_show_blobs(args.client,
+                                  lvs=args.lvs)
+
+    p = subparsers.add_parser('lvol_show_blobs', aliases=['show_blobs'],
+                              help='show blob')
+    p.add_argument('lvs', help='lvs name')
+    p.set_defaults(func=lvol_show_blobs)
+
     def bdev_raid_get_bdevs(args):
         print_array(rpc.bdev.bdev_raid_get_bdevs(args.client,
                                                  category=args.category))

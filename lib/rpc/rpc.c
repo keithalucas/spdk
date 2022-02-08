@@ -101,10 +101,10 @@ _get_rpc_method_raw(const char *method)
 	return _get_rpc_method(&method_val);
 }
 
-static void
-jsonrpc_handler(struct spdk_jsonrpc_request *request,
-		const struct spdk_json_val *method,
-		const struct spdk_json_val *params)
+void
+spdk_rpc_handler(struct spdk_jsonrpc_request *request, 
+		 const struct spdk_json_val *method, 
+		 const struct spdk_json_val *params)
 {
 	struct spdk_rpc_method *m;
 
@@ -198,7 +198,7 @@ spdk_rpc_listen(const char *listen_addr)
 	g_jsonrpc_server = spdk_jsonrpc_server_listen(AF_UNIX, 0,
 			   (struct sockaddr *)&g_rpc_listen_addr_unix,
 			   sizeof(g_rpc_listen_addr_unix),
-			   jsonrpc_handler);
+			   spdk_rpc_handler);
 	if (g_jsonrpc_server == NULL) {
 		SPDK_ERRLOG("spdk_jsonrpc_server_listen() failed\n");
 		close(g_rpc_lock_fd);

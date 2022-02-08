@@ -1266,3 +1266,15 @@ def bdev_nvme_get_controller_health_info(client, name):
     params = {}
     params['name'] = name
     return client.call('bdev_nvme_get_controller_health_info', params)
+
+def lvol_show_blobs(client, lvs):
+    """Examine a bdev manually. If the bdev does not exist yet when this RPC is called,
+    it will be examined when it is created
+
+    Args:
+        name: name of the bdev
+    """
+    params = {
+        'lvs': lvs
+    }
+    return client.call('lvol_show_blobs', params)

@@ -1,0 +1,17 @@
+FROM ubuntu:20.04
+
+ARG http_proxy
+ARG https_proxy
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get dist-upgrade -y && \
+    apt-get install -y make linux-libc-dev pkg-config \
+        devscripts libaio-dev libc6-dev gcc meson \
+	python3-pyelftools uuid-dev libssl-dev \
+	libibverbs-dev libfuse-dev libiscsi-dev \
+	zlib1g-dev libfdt-dev libpcap0.8-dev \
+	libncurses-dev libcunit1-dev \
+	build-essential nasm autoconf libtool automake
+

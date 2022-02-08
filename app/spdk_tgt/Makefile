@@ -41,6 +41,8 @@ C_SRCS := spdk_tgt.c
 
 SPDK_LIB_LIST = $(ALL_MODULES_LIST)
 
+SPDK_LIB_LIST += bdev_longhorn
+
 SPDK_LIB_LIST += event event_iscsi event_nvmf
 
 ifeq ($(SPDK_ROOT_DIR)/lib/env_dpdk,$(CONFIG_ENV))

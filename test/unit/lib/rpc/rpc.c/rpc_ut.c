@@ -132,7 +132,7 @@ test_jsonrpc_handler(void)
 
 	/* Case 1: Method not found */
 	method.type = SPDK_JSON_VAL_INVALID;
-	jsonrpc_handler(request, &method, &params);
+	spdk_rpc_handler(request, &method, &params);
 	CU_ASSERT(g_rpc_err == SPDK_JSONRPC_ERROR_METHOD_NOT_FOUND);
 
 	/* Case 2:  Method is alias */
@@ -148,21 +148,21 @@ test_jsonrpc_handler(void)
 	/* m->state_mask & g_rpc_state == g_rpc_state */
 	g_rpc_err = -1;
 	g_rpc_state = SPDK_RPC_STARTUP;
-	jsonrpc_handler(request, &method, &params);
+	spdk_rpc_handler(request, &method, &params);
 	CU_ASSERT(g_rpc_err == 0);
 
 	/* g_rpc_state == SPDK_RPC_STARTUP */
 	is_alias_of.state_mask = SPDK_RPC_RUNTIME;
 	g_rpc_err = -1;
 	g_rpc_state = SPDK_RPC_STARTUP;
-	jsonrpc_handler(request, &method, &params);
+	spdk_rpc_handler(request, &method, &params);
 	CU_ASSERT(g_rpc_err == SPDK_JSONRPC_ERROR_INVALID_STATE);
 
 	/* SPDK_RPC_RUNTIME is invalid for the aliastest RPC */
 	is_alias_of.state_mask = SPDK_RPC_STARTUP;
 	g_rpc_err = -1;
 	g_rpc_state = SPDK_RPC_RUNTIME;
-	jsonrpc_handler(request, &method, &params);
+	spdk_rpc_handler(request, &method, &params);
 	CU_ASSERT(g_rpc_err == SPDK_JSONRPC_ERROR_INVALID_STATE);
 
 	SLIST_REMOVE_HEAD(&g_rpc_methods, slist);

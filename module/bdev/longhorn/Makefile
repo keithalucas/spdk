@@ -1,4 +1,6 @@
 #
+#  BSD LICENSE
+#
 #  Copyright (c) Intel Corporation.
 #  All rights reserved.
 #
@@ -31,12 +33,13 @@
 
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
-include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 
-APP = hello_blob
+SO_VER := 3
+SO_MINOR := 0
 
-C_SRCS := hello_blob.c
+C_SRCS = bdev_longhorn.c bdev_longhorn_rpc.c bdev_longhorn_rebuild.c bdev_longhorn_rebuild_rpc.c bdev_longhorn_remote.c bdev_longhorn_remote_sync.c bdev_longhorn_sync_client.c bdev_longhorn_lvol.c bdev_longhorn_impl.c bdev_longhorn_nvmf.c bdev_longhorn_sync.c bdev_longhorn_replica_rpc.c bdev_longhorn_replica.c bdev_longhorn_snapshot.c bdev_longhorn_snapshot_rpc.c
+LIBNAME = bdev_longhorn
 
-SPDK_LIB_LIST = $(filter-out bdev_longhorn,$(ALL_MODULES_LIST)) event event_bdev
+SPDK_MAP_FILE = $(SPDK_ROOT_DIR)/mk/spdk_blank.map
 
-include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
+include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk

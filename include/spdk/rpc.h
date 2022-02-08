@@ -148,6 +148,19 @@ void spdk_rpc_set_state(uint32_t state_mask);
  */
 uint32_t spdk_rpc_get_state(void);
 
+/**
+ * Handle an RPC message.  This allows the creations of a different 
+ * \c spdk_jsonrpc_server that uses the same internal registry of JSON 
+ * methods.
+ *
+ * \param request RPC request to handle.
+ * \param method Name for the registered method.
+ * \param request
+ */
+void spdk_rpc_handler(struct spdk_jsonrpc_request *request, 
+		      const struct spdk_json_val *method, 
+		      const struct spdk_json_val *params);
+
 #ifdef __cplusplus
 }
 #endif
