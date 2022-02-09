@@ -100,6 +100,7 @@ struct longhorn_base_bdev_info {
 	uint16_t nvmf_port;
 	uint16_t comm_port;
 	char *bdev_name;
+	char *remote_nqn;
 	
 	TAILQ_ENTRY(longhorn_base_bdev_info) infos;
 };
@@ -223,6 +224,9 @@ struct longhorn_bdev {
 	/* Set to true if destroy of this longhorn bdev is started. */
 	bool				destroy_started;
 
+	bool op_in_progress;
+
+
 	atomic_int                      io_ops;
 	atomic_int                      channels_to_pause;
 
@@ -317,9 +321,10 @@ void bdev_longhorn_pause_io(void *cb_arg);
 void bdev_longhorn_unpause_io(void *cb_arg);
 struct longhorn_bdev *longhorn_bdev_find_by_name(const char *longhorn_name);
 
-void longhorn_unpause(struct longhorn_bdev *longhorn_bdev);
+int longhorn_unpause(struct longhorn_bdev *longhorn_bdev);
 void longhorn_volume_add_pause_cb(struct longhorn_bdev *longhorn_dev,
                                   longhorn_pause_cb cb_fn,
                                   void *cb_arg);
+int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port);
 
 #endif /* SPDK_BDEV_RAID_INTERNAL_H */

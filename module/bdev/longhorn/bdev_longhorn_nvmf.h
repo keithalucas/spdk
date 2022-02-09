@@ -24,5 +24,8 @@ void longhorn_set_external_addr(const char *addr,
 typedef void (*longhorn_attach_nvmf_cb)(const char **bdev_names, size_t bdev_cnt, int status, void *arg);
 void longhorn_attach_nvmf(const char *bdev_name_prefix, const char *nqn, const char *addr, uint16_t port, longhorn_attach_nvmf_cb cb_fn, void *cb_arg);
 
+char *
+longhorn_generate_replica_nqn(const char *lvs, const char *name);
+
 #endif /* _BDEV_LONGHORN_NVMF_H_ */
 

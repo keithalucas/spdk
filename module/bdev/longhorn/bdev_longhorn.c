@@ -254,7 +254,6 @@ longhorn_bdev_destroy_cb(void *io_device, void *ctx_buf)
 	struct longhorn_bdev_io_channel *longhorn_ch = ctx_buf;
 	struct longhorn_base_io_channel *base_channel;
 	struct longhorn_base_io_channel *next;
-	uint8_t i;
 
 	SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_destroy_cb\n");
 	SPDK_ERRLOG("longhorn_bdev_destroy_cb, %p\n", longhorn_ch);
@@ -976,8 +975,6 @@ int
 longhorn_bdev_config_add_base_bdev(struct longhorn_bdev_config *longhorn_cfg, const char *base_bdev_name,
 			       uint8_t slot)
 {
-	uint8_t i;
-	struct longhorn_bdev_config *tmp;
 	char *bdev_name;
 
 	if (slot >= longhorn_cfg->num_base_bdevs) {
@@ -1622,13 +1619,41 @@ longhorn_bdev_add_base_device(struct longhorn_bdev *longhorn_bdev,
 }
 
 struct replica_add_ctx {
+	struct longhorn_bdev	*longhorn_bdev;
 	struct longhorn_base_bdev_info *base_info;
+
+	char *prefix;
 };
+
+static void
+longhorn_replica_attach_cb(const char **bdev_names, size_t bdev_cnt,
+			   int status, void *arg) 
+{
+	struct replica_add_ctx *ctx = arg;
+
+	if (bdev_cnt > 0) {
+		ctx->base_info->bdev_name = strdup(bdev_names[0]);
+
+		longhorn_bdev_add_base_device(ctx->longhorn_bdev, ctx->base_info);
+	}
+
+	free(ctx->prefix);
+	free(ctx);
+
+}
+
+static char *
+generate_prefix(const char *name) {
+	static int n = 0;
+
+	return spdk_sprintf_alloc("%s_nvmf%d_", name, n++);
+}
 
 int 
 longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port) {
 	struct longhorn_bdev	*longhorn_bdev;
 	struct longhorn_base_bdev_info *base_info;
+	struct replica_add_ctx *ctx;
 
 	longhorn_bdev = longhorn_bdev_find_by_name(name);
 	if (!longhorn_bdev) {
@@ -1649,7 +1674,22 @@ longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf
 		base_info->remote_addr = strdup(addr);
 		base_info->nvmf_port = nvmf_port;
 		base_info->comm_port = comm_port;
+
+		base_info->remote_nqn = longhorn_generate_replica_nqn(lvs, name);
+
+		ctx = calloc(1, sizeof(*ctx));
+		
+		ctx->longhorn_bdev = longhorn_bdev;
+		ctx->base_info = base_info;
+		ctx->prefix = generate_prefix(name);
+
+		SPDK_ERRLOG("attempting to attach %s\n", base_info->remote_nqn);
+
+		longhorn_attach_nvmf(ctx->prefix, base_info->remote_nqn, addr, 
+				     nvmf_port, longhorn_replica_attach_cb, ctx);
 	}
+
+	return 0;
 }
 	
 
@@ -1707,8 +1747,6 @@ longhorn_bdev_add_base_devices(struct longhorn_bdev_config *longhorn_cfg)
 static void
 longhorn_bdev_examine(struct spdk_bdev *bdev)
 {
-	struct longhorn_bdev_config	*longhorn_cfg;
-	uint8_t			base_bdev_slot;
 
 #if 0
 	if (longhorn_bdev_can_claim_bdev(bdev->name, &longhorn_cfg, &base_bdev_slot)) {
@@ -1858,9 +1896,9 @@ int longhorn_bdev_remove_replica(char *name, char *lvs, char *addr, uint16_t nvm
 
 int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port) {
 	struct longhorn_bdev	*longhorn_bdev;
-	struct longhorn_base_bdev_info	*base_info;
-	struct longhorn_bdev_io_channel *io_channel;
-	struct io_channel_remove_ctx *ctx;
+	//struct longhorn_base_bdev_info	*base_info;
+	//struct longhorn_bdev_io_channel *io_channel;
+	//struct io_channel_remove_ctx *ctx;
 	int			rc;
 
 	longhorn_bdev = longhorn_bdev_find_by_name(name);
@@ -1877,11 +1915,14 @@ int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf
 		}
 
 
+
 		return -errno;
 	}
+
+	return 0;
 }
 
-void longhorn_unpause(struct longhorn_bdev *longhorn_bdev)
+int longhorn_unpause(struct longhorn_bdev *longhorn_bdev)
 {
 	int			rc;
 	struct longhorn_bdev_io_channel *io_channel;

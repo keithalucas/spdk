@@ -159,10 +159,9 @@ longhorn_submit_write_request(struct longhorn_bdev_io *longhorn_io)
 	struct longhorn_base_io_channel *base_channel;
 
 	assert(longhorn_ch != NULL);
-	assert(longhorn_ch->base_channel);
 
 	if (longhorn_io->base_bdev_io_remaining == 0) {
-		longhorn_io->base_bdev_io_remaining = longhorn_bdev->num_base_bdevs;
+		longhorn_io->base_bdev_io_remaining = longhorn_ch->num_channels;
 	}
 
 	TAILQ_FOREACH(base_channel, &longhorn_ch->base_channels, channels) {

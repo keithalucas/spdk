@@ -1,4 +1,5 @@
 #include "spdk/nvmf.h"
+#include "spdk/string.h"
 #include "spdk/util.h"
 
 #include "bdev_longhorn_nvmf.h"
@@ -119,7 +120,7 @@ static void add_ns_pause_cb(struct spdk_nvmf_subsystem *subsystem, void *cb_arg,
 }
 
 void longhorn_nvmf_subsystem_add_ns(const char *nqn, const char *bdev_name) { 
-	struct spdk_nvmf_tgt *tgt;
+	struct spdk_nvmf_tgt *tgt = NULL;
 	struct spdk_nvmf_subsystem      *subsystem;
 	
 	subsystem = spdk_nvmf_tgt_find_subsystem(tgt, nqn);
@@ -218,7 +219,9 @@ void longhorn_attach_nvmf(const char *bdev_name_prefix, const char *nqn,
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
 
-	bdev_nvme_create(&trid, &hostid, bdev_name_prefix, ctx->names, ctx->count, 
+	spdk_nvme_ctrlr_get_default_ctrlr_opts(&ctx->opts, sizeof(ctx->opts));
+
+	bdev_nvme_create(trid, &hostid, bdev_name_prefix, ctx->names, ctx->count, 
 			 prchk_flags, longhorn_nvme_create_cb, ctx, &ctx->opts);
 
 }
@@ -267,6 +270,11 @@ void longhorn_set_external_addr(const char *addr,
 
 }
 
+char *
+longhorn_generate_replica_nqn(const char *lvs, const char *name) {
+	char *nqn = spdk_sprintf_alloc(REPLICA_FORMAT, lvs, name);
+	return nqn;
+}
 
 
 
