@@ -115,6 +115,18 @@ void compare_bdev_event_cb(enum spdk_bdev_event_type type,
 }
 
 static void compare_free_ctx(struct compare_ctx *ctx) {
+	if (ctx->channel1)
+		spdk_put_io_channel(ctx->channel1);
+
+	if (ctx->channel2)
+		spdk_put_io_channel(ctx->channel2);
+
+	spdk_bdev_close(ctx->desc1);
+	spdk_bdev_close(ctx->desc2);
+
+	spdk_free(ctx->block1);
+	spdk_free(ctx->block2);
+
 	free(ctx);
 }
 
@@ -128,7 +140,7 @@ static void read_bdev2_cb(struct spdk_bdev_io *bdev_io,
 	struct block *bad_block;
 
 	if (success) {
-		if (memcpy(ctx->block1, ctx->block2, ctx->diff.blocksize) != 0) {
+		if (memcmp(ctx->block1, ctx->block2, ctx->diff.blocksize) != 0) {
 			bad_block = calloc(1, sizeof(*bad_block));
 			bad_block->block = ctx->block_num;
 
@@ -158,20 +170,31 @@ static void read_bdev1_cb(struct spdk_bdev_io *bdev_io,
 			  void *cb_arg) {
 	struct compare_ctx *ctx = cb_arg;
 
+	printf("here\n");
 	if (success) {
+		printf("read2 %lu %lu\n", ctx->block_num * ctx->diff.blocksize, ctx->block_num);
 		spdk_bdev_read(ctx->desc2, ctx->channel2, ctx->block2,
 		       	       ctx->block_num * ctx->diff.blocksize,
 		       	       ctx->diff.blocksize, read_bdev2_cb, ctx);
 	} else {
+		printf("read1 failed\n");
 		ctx->cb_fn(-1, &ctx->diff, ctx->cb_arg);
 		compare_free_ctx(ctx);
 	}
 }
 
 static void read_bdev1(struct compare_ctx *ctx) {
-	spdk_bdev_read(ctx->desc1, ctx->channel1, ctx->block1,
+		printf("read1 %lu %lu\n", ctx->block_num * ctx->diff.blocksize, ctx->block_num);
+	int rc = 0;
+	rc = spdk_bdev_read(ctx->desc1, ctx->channel1, ctx->block1,
 		       ctx->block_num * ctx->diff.blocksize,
 		       ctx->diff.blocksize, read_bdev1_cb, ctx);
+
+	if (rc != 0) {
+		ctx->cb_fn(0, &ctx->diff, ctx->cb_arg);
+		compare_free_ctx(ctx);
+	}
+	printf("spdk_bdev_read returned %d\n", rc);
 }
 
 static uint64_t bdev_get_size(struct spdk_bdev *bdev) {
@@ -195,11 +218,13 @@ void bdev_longhorn_compare(const char *bdev_name1,
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
 
-	rc = spdk_bdev_open_ext(bdev_name1, true, compare_bdev_event_cb,
+	rc = spdk_bdev_open_ext(bdev_name1, false, compare_bdev_event_cb,
 				ctx, &ctx->desc1);
 
-	rc = spdk_bdev_open_ext(bdev_name2, true, compare_bdev_event_cb,
+	printf("spdk_bdev_open_ext %d\n", rc);
+	rc = spdk_bdev_open_ext(bdev_name2, false, compare_bdev_event_cb,
 				ctx, &ctx->desc2);
+	printf("spdk_bdev_open_ext %d\n", rc);
 
 	ctx->bdev1 = spdk_bdev_desc_get_bdev(ctx->desc1);
 	ctx->bdev2 = spdk_bdev_desc_get_bdev(ctx->desc2);
@@ -216,9 +241,12 @@ void bdev_longhorn_compare(const char *bdev_name1,
 
 	ctx->size1 = bdev_get_size(ctx->bdev1);
 	ctx->size2 = bdev_get_size(ctx->bdev2);
+	ctx->diff.size1 = ctx->size1;
+	ctx->diff.size2 = ctx->size2;
 	
 	ctx->total_blocks = spdk_min(ctx->size1, ctx->size2) / blocksize;
 
+	read_bdev1(ctx);
 }
 
 struct longhorn_bdev_snapshot_ctx {
@@ -235,7 +263,7 @@ static void longhorn_bdev_snapshot_complete(void *cb_arg,
 
 	ctx->snapshots_complete++;
 
-	SPDK_ERRLOG("%d snapshots complete %d %s\n", ctx->snapshots_complete, lvolerrno, strerror(-lvolerrno));
+	SPDK_DEBUGLOG(bdev_longhorn, "%d snapshots complete %d %s\n", ctx->snapshots_complete, lvolerrno, strerror(-lvolerrno));
 
 	if (ctx->snapshots_complete >= ctx->num_to_snapshot) {
 		longhorn_unpause(ctx->longhorn_bdev);
@@ -244,12 +272,22 @@ static void longhorn_bdev_snapshot_complete(void *cb_arg,
 	}
 }
 
-static void longhorn_bdev_snapshot(struct longhorn_bdev *longhorn_bdev,
-                            const char *snapshot)
+
+struct longhorn_snapshot_ctx {
+	const char *name;
+	const char *snapshot_name;
+	struct longhorn_bdev *bdev;
+	struct spdk_thread *thread;
+};
+
+static void longhorn_bdev_snapshot(void *arg)
 {
 
-        struct longhorn_base_bdev_info  *base_info;
+	struct longhorn_snapshot_ctx *snapshot_ctx = arg;
 	struct longhorn_bdev_snapshot_ctx *ctx;
+	const char *snapshot = snapshot_ctx->snapshot_name;
+	struct longhorn_bdev *longhorn_bdev = snapshot_ctx->bdev;
+        struct longhorn_base_bdev_info  *base_info;
 	struct spdk_bdev *bdev;
         struct spdk_lvol *lvol;
 
@@ -281,27 +319,29 @@ static void longhorn_bdev_snapshot(struct longhorn_bdev *longhorn_bdev,
 
 
                 } else {
-			ctx->snapshots_complete++;
+			bdev_longhorn_snapshot_remote(base_info->remote_addr, 
+						      base_info->bdev_name,
+						      base_info->lvs,
+						      snapshot,
+						      longhorn_bdev_snapshot_complete, 
+						      ctx);
+
 		}
         }
+
+	free(snapshot_ctx->name);
+	free(snapshot_ctx->snapshot_name);
+	free(snapshot_ctx);
 }
 
 
 
-struct longhorn_snapshot_ctx {
-	const char *name;
-	const char *snapshot_name;
-};
-
 static void longhorn_snapshot_pause_complete(struct longhorn_bdev *bdev, 
 					     void *arg) {
 	struct longhorn_snapshot_ctx *ctx = arg;
+	ctx->bdev = bdev;
 
-	longhorn_bdev_snapshot(bdev, ctx->snapshot_name);
-
-	free(ctx->name);
-	free(ctx->snapshot_name);
-	free(ctx);
+	spdk_thread_send_msg(ctx->thread, longhorn_bdev_snapshot, ctx);
 }
 
 int
@@ -320,6 +360,7 @@ longhorn_volume_snapshot(const char *name, const char *snapshot_name) {
 	ctx = calloc(1, sizeof(*ctx));
 	ctx->name = strdup(name);
 	ctx->snapshot_name = strdup(snapshot_name);
+	ctx->thread = spdk_get_thread();
 
         rc = pthread_mutex_trylock(&longhorn_bdev->base_bdevs_mutex);
 

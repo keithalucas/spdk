@@ -32,7 +32,7 @@
  */
 
 #include "bdev_longhorn.h"
-#include "bdev_longhorn_impl.h"
+#include "bdev_longhorn_io.h"
 #include "bdev_longhorn_nvmf.h"
 #include "spdk/env.h"
 #include "spdk/thread.h"
@@ -41,13 +41,9 @@
 #include "spdk/util.h"
 #include "spdk/json.h"
 #include "spdk/string.h"
+#include "lib/thread/thread_internal.h"
 
 static bool g_shutdown_started = false;
-
-/* longhorn bdev config as read from config file */
-struct longhorn_config	g_longhorn_config = {
-	.longhorn_bdev_config_head = TAILQ_HEAD_INITIALIZER(g_longhorn_config.longhorn_bdev_config_head),
-};
 
 /*
  * List of longhorn bdev in configured list, these longhorn bdevs are registered with
@@ -94,33 +90,24 @@ longhorn_bdev_create_cb(void *io_device, void *ctx_buf)
 	struct longhorn_base_bdev_info *base_info;
 	struct spdk_thread *thread;
 	struct longhorn_base_io_channel *base_channel;
-	uint8_t i = 0;
 
 	TAILQ_INIT(&longhorn_ch->base_channels);
+	TAILQ_INIT(&longhorn_ch->io_wait_queue);
 	thread = spdk_get_thread();
 
 	longhorn_ch->thread = thread;
-	SPDK_DEBUGLOG(bdev_longhorn, "onghorn_bdev_create_cb, %p\n", longhorn_ch);
-	SPDK_ERRLOG("longhorn_bdev_create_cb, %p, %p (%s)\n", longhorn_ch, thread, spdk_thread_get_name(thread));
+	SPDK_DEBUGLOG(bdev_longhorn, "Calling longhorn_bdev_create_cb for thread %s (%p)\n", spdk_thread_get_name(thread), thread);
 
 	assert(longhorn_bdev != NULL);
 	assert(longhorn_bdev->state == RAID_BDEV_STATE_ONLINE);
 
-	longhorn_ch->num_channels = longhorn_bdev->num_base_bdevs;
+	longhorn_ch->num_channels = 0;
 	longhorn_ch->longhorn_bdev = longhorn_bdev;
 
 
-#if 0
-	// TODO linked list
-	longhorn_ch->base_channel = calloc(longhorn_ch->num_channels,
-				       sizeof(struct spdk_io_channel *));
-	if (!longhorn_ch->base_channel) {
-		SPDK_ERRLOG("Unable to allocate base bdevs io channel\n");
-		return -ENOMEM;
-	}
-#endif
 
 	TAILQ_FOREACH(base_info, &longhorn_bdev->base_bdevs_head, infos) {
+
 		base_channel = calloc(1, sizeof(*base_channel));
 		/*
 		 * Get the spdk_io_channel for all the base bdevs. This is used during
@@ -128,34 +115,17 @@ longhorn_bdev_create_cb(void *io_device, void *ctx_buf)
 		 * bdev io channel.
 		 */
 		base_channel->base_channel = spdk_bdev_get_io_channel(base_info->desc);
-		//longhorn_ch->base_channel[i] = base_info->base_channel;
 
-		//base_channel->base_channel = base_info->base_channel;
-		SPDK_ERRLOG("base_info when creating io_channel %p\n", base_info);
 		base_channel->base_info = base_info;
 
 		if (!base_channel->base_channel) {
 			SPDK_ERRLOG("Unable to create io channel for base bdev\n");
 		}
-#if 0
-		if (!base_channel->base_channel[i]) {
-			uint8_t j;
 
-			for (j = 0; j < i; j++) {
-				spdk_put_io_channel(longhorn_ch->base_channel[j]);
-			}
-			free(base_channel->base_channel);
-			longhorn_ch->base_channel = NULL;
-			SPDK_ERRLOG("Unable to create io channel for base bdev\n");
-			return -ENOMEM;
-		}
-#endif
+		longhorn_ch->num_channels++;
 
 		TAILQ_INSERT_TAIL(&longhorn_ch->base_channels, 
 				  base_channel, channels);
-
-
-		++i;
 
 	}
 
@@ -184,11 +154,10 @@ static void longhorn_check_pause_complete(struct longhorn_bdev *longhorn_bdev)
 	entry = TAILQ_FIRST(&longhorn_bdev->pause_cbs);
 
 	while (entry != NULL) {
-
 		if (entry->cb_fn != NULL) {
 			entry->cb_fn(longhorn_bdev, entry->cb_arg);
 		} else {
-		SPDK_ERRLOG("PAUSE CB NULL \n");
+			SPDK_ERRLOG("PAUSE CB NULL \n");
 		}
 		next = TAILQ_NEXT(entry, link);
 
@@ -255,8 +224,7 @@ longhorn_bdev_destroy_cb(void *io_device, void *ctx_buf)
 	struct longhorn_base_io_channel *base_channel;
 	struct longhorn_base_io_channel *next;
 
-	SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_destroy_cb\n");
-	SPDK_ERRLOG("longhorn_bdev_destroy_cb, %p\n", longhorn_ch);
+	SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_destroy_cb, %p\n", longhorn_ch);
 
 	assert(longhorn_ch != NULL);
 
@@ -267,7 +235,7 @@ longhorn_bdev_destroy_cb(void *io_device, void *ctx_buf)
 		next = TAILQ_NEXT(base_channel, channels);
 
 		
-		SPDK_ERRLOG("longhorn_bdev_destroy_cb, removing bdev %s\n", base_channel->base_info->bdev->name);
+		SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_destroy_cb, removing bdev %s\n", base_channel->base_info->bdev->name);
 		spdk_put_io_channel(base_channel->base_channel);
 
 		free(base_channel);
@@ -279,19 +247,10 @@ longhorn_bdev_destroy_cb(void *io_device, void *ctx_buf)
 	longhorn_ch->deleted = true;
 
 	longhorn_bdev->num_io_channels--;
-		SPDK_ERRLOG("removing num io channels %u\n", longhorn_bdev->num_io_channels);
+
+	SPDK_DEBUGLOG(bdev_longhorn, "removing num io channels %u\n", longhorn_bdev->num_io_channels);
 	TAILQ_REMOVE(&longhorn_bdev->io_channel_head, longhorn_ch, channels);
 
-#if 0
-	
-	for (i = 0; i < longhorn_ch->num_channels; i++) {
-		/* Free base bdev channels */
-		assert(longhorn_ch->base_channel[i] != NULL);
-		spdk_put_io_channel(longhorn_ch->base_channel[i]);
-	}
-	free(longhorn_ch->base_channel);
-#endif
-	//onghorn_ch->base_channel = NULL;
 }
 
 /*
@@ -319,9 +278,12 @@ longhorn_bdev_cleanup(struct longhorn_bdev *longhorn_bdev)
 	TAILQ_REMOVE(&g_longhorn_bdev_list, longhorn_bdev, global_link);
 	free(longhorn_bdev->bdev.name);
 	free(longhorn_bdev->base_bdev_info);
+
+#if 0
 	if (longhorn_bdev->config) {
 		longhorn_bdev->config->longhorn_bdev = NULL;
 	}
+#endif
 	free(longhorn_bdev);
 }
 
@@ -500,147 +462,6 @@ longhorn_bdev_queue_io_wait(struct longhorn_bdev_io *longhorn_io, struct spdk_bd
 	spdk_bdev_queue_io_wait(bdev, ch, &longhorn_io->waitq_entry);
 }
 
-static void
-longhorn_base_bdev_reset_complete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
-{
-	struct longhorn_bdev_io *longhorn_io = cb_arg;
-
-	spdk_bdev_free_io(bdev_io);
-
-	longhorn_bdev_io_complete_part(longhorn_io, 1, success ?
-				   SPDK_BDEV_IO_STATUS_SUCCESS :
-				   SPDK_BDEV_IO_STATUS_FAILED);
-}
-
-static void
-longhorn_bdev_submit_reset_request(struct longhorn_bdev_io *longhorn_io);
-
-static void
-_longhorn_bdev_submit_reset_request(void *_longhorn_io)
-{
-	struct longhorn_bdev_io *longhorn_io = _longhorn_io;
-
-	longhorn_bdev_submit_reset_request(longhorn_io);
-}
-
-/*
- * brief:
- * longhorn_bdev_submit_reset_request function submits reset requests
- * to member disks; it will submit as many as possible unless a reset fails with -ENOMEM, in
- * which case it will queue it for later submission
- * params:
- * longhorn_io
- * returns:
- * none
- */
-static void
-longhorn_bdev_submit_reset_request(struct longhorn_bdev_io *longhorn_io)
-{
-	struct longhorn_bdev_io_channel *longhorn_ch = longhorn_io->longhorn_ch;
-        struct longhorn_bdev            *longhorn_bdev = longhorn_io->longhorn_bdev;
-	int				ret;
-	struct longhorn_base_bdev_info	*base_info;
-	struct spdk_io_channel		*base_ch;
-	struct longhorn_base_io_channel *base_channel;
-
-
-	if (longhorn_io->base_bdev_io_remaining == 0) {
-		longhorn_io->base_bdev_io_remaining = longhorn_bdev->num_base_bdevs;
-	}
-
-	TAILQ_FOREACH(base_channel, &longhorn_ch->base_channels, channels) {
-	//while (longhorn_io->base_bdev_io_submitted < longhorn_bdev->num_base_bdevs) {
-		base_ch = base_channel->base_channel;
-                base_info = base_channel->base_info;
-
-		ret = spdk_bdev_reset(base_info->desc, base_ch,
-				      longhorn_base_bdev_reset_complete, longhorn_io);
-		if (ret == 0) {
-			longhorn_io->base_bdev_io_submitted++;
-		} else if (ret == -ENOMEM) {
-			longhorn_bdev_queue_io_wait(longhorn_io, base_info->bdev, base_ch,
-						_longhorn_bdev_submit_reset_request);
-			return;
-		} else {
-			SPDK_ERRLOG("bdev io submit error not due to ENOMEM, it should not happen\n");
-			assert(false);
-			longhorn_bdev_io_complete(longhorn_io, SPDK_BDEV_IO_STATUS_FAILED);
-			return;
-		}
-	}
-}
-
-/*
- * brief:
- * Callback function to spdk_bdev_io_get_buf.
- * params:
- * ch - pointer to longhorn bdev io channel
- * bdev_io - pointer to parent bdev_io on longhorn bdev device
- * success - True if buffer is allocated or false otherwise.
- * returns:
- * none
- */
-static void
-longhorn_bdev_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
-		     bool success)
-{
-	struct longhorn_bdev_io *longhorn_io = (struct longhorn_bdev_io *)bdev_io->driver_ctx;
-
-	if (!success) {
-		longhorn_bdev_io_complete(longhorn_io, SPDK_BDEV_IO_STATUS_FAILED);
-		return;
-	}
-
-	longhorn_submit_rw_request(longhorn_io);
-}
-
-/*
- * brief:
- * longhorn_bdev_submit_request function is the submit_request function pointer of
- * longhorn bdev function table. This is used to submit the io on longhorn_bdev to below
- * layers.
- * params:
- * ch - pointer to longhorn bdev io channel
- * bdev_io - pointer to parent bdev_io on longhorn bdev device
- * returns:
- * none
- */
-static void
-longhorn_bdev_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
-{
-	struct longhorn_bdev_io *longhorn_io = (struct longhorn_bdev_io *)bdev_io->driver_ctx;
-
-	longhorn_io->longhorn_bdev = bdev_io->bdev->ctxt;
-	longhorn_io->longhorn_ch = spdk_io_channel_get_ctx(ch);
-	longhorn_io->base_bdev_io_remaining = 0;
-	longhorn_io->base_bdev_io_submitted = 0;
-	longhorn_io->base_bdev_io_status = SPDK_BDEV_IO_STATUS_SUCCESS;
-
-	switch (bdev_io->type) {
-	case SPDK_BDEV_IO_TYPE_READ:
-		spdk_bdev_io_get_buf(bdev_io, longhorn_bdev_get_buf_cb,
-				     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
-		break;
-	case SPDK_BDEV_IO_TYPE_WRITE:
-		longhorn_submit_rw_request(longhorn_io);
-		break;
-
-	case SPDK_BDEV_IO_TYPE_RESET:
-		longhorn_bdev_submit_reset_request(longhorn_io);
-		break;
-
-	case SPDK_BDEV_IO_TYPE_FLUSH:
-	case SPDK_BDEV_IO_TYPE_UNMAP:
-		longhorn_submit_null_payload_request(longhorn_io);
-		break;
-
-	default:
-		SPDK_ERRLOG("submit request, invalid io type %u\n", bdev_io->type);
-		longhorn_bdev_io_complete(longhorn_io, SPDK_BDEV_IO_STATUS_FAILED);
-		break;
-	}
-}
-
 /*
  * brief:
  * _longhorn_bdev_io_type_supported checks whether io_type is supported in
@@ -756,7 +577,7 @@ longhorn_bdev_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
 	spdk_json_write_named_uint32(w, "num_base_bdevs_discovered", longhorn_bdev->num_base_bdevs_discovered);
 	spdk_json_write_name(w, "base_bdevs_list");
 	spdk_json_write_array_begin(w);
-	//LONGHORN_FOR_EACH_BASE_BDEV(longhorn_bdev, base_info) {
+	
 	TAILQ_FOREACH(base_info, &longhorn_bdev->base_bdevs_head, infos) {
 		if (base_info->bdev) {
 			spdk_json_write_string(w, base_info->bdev->name);
@@ -815,6 +636,8 @@ static const struct spdk_bdev_fn_table g_longhorn_bdev_fn_table = {
 	.write_config_json	= longhorn_bdev_write_config_json,
 };
 
+#if 0
+
 /*
  * brief:
  * longhorn_bdev_config_cleanup function is used to free memory for one longhorn_bdev in configuration
@@ -827,8 +650,7 @@ void
 longhorn_bdev_config_cleanup(struct longhorn_bdev_config *longhorn_cfg)
 {
 	uint8_t i;
-
-	TAILQ_REMOVE(&g_longhorn_config.longhorn_bdev_config_head, longhorn_cfg, link);
+TAILQ_REMOVE(&g_longhorn_config.longhorn_bdev_config_head, longhorn_cfg, link);
 	g_longhorn_config.total_longhorn_bdev--;
 
 	if (longhorn_cfg->base_bdev) {
@@ -840,6 +662,7 @@ longhorn_bdev_config_cleanup(struct longhorn_bdev_config *longhorn_cfg)
 	free(longhorn_cfg->name);
 	free(longhorn_cfg);
 }
+#endif
 
 /*
  * brief:
@@ -853,14 +676,17 @@ longhorn_bdev_config_cleanup(struct longhorn_bdev_config *longhorn_cfg)
 static void
 longhorn_bdev_free(void)
 {
+#if 0
 	struct longhorn_bdev_config *longhorn_cfg, *tmp;
 
 	SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_free\n");
 	TAILQ_FOREACH_SAFE(longhorn_cfg, &g_longhorn_config.longhorn_bdev_config_head, link, tmp) {
 		longhorn_bdev_config_cleanup(longhorn_cfg);
 	}
+#endif
 }
 
+#if 0
 /* brief
  * longhorn_bdev_config_find_by_name is a helper function to find longhorn bdev config
  * by name as key.
@@ -881,6 +707,7 @@ longhorn_bdev_config_find_by_name(const char *longhorn_name)
 
 	return longhorn_cfg;
 }
+#endif
 
 /* brief
  * longhorn_bdev_find_by_name is a helper function to find longhorn bdev 
@@ -904,6 +731,7 @@ longhorn_bdev_find_by_name(const char *longhorn_name)
 }
 
 
+#if 0
 /*
  * brief
  * longhorn_bdev_config_add function adds config for newly created longhorn bdev.
@@ -961,50 +789,7 @@ longhorn_bdev_config_add(const char *longhorn_name, uint8_t num_base_bdevs,
 	*_longhorn_cfg = longhorn_cfg;
 	return 0;
 }
-
-/*
- * brief:
- * longhorn_bdev_config_add_base_bdev function add base bdev to longhorn bdev config.
- *
- * params:
- * longhorn_cfg - pointer to longhorn bdev configuration
- * base_bdev_name - name of base bdev
- * slot - Position to add base bdev
- */
-int
-longhorn_bdev_config_add_base_bdev(struct longhorn_bdev_config *longhorn_cfg, const char *base_bdev_name,
-			       uint8_t slot)
-{
-	char *bdev_name;
-
-	if (slot >= longhorn_cfg->num_base_bdevs) {
-		return -EINVAL;
-	}
-
-	bdev_name = spdk_sprintf_alloc("%s/%s", base_bdev_name, longhorn_cfg->name);
-
-#if 0
-	TAILQ_FOREACH(tmp, &g_longhorn_config.longhorn_bdev_config_head, link) {
-		for (i = 0; i < tmp->num_base_bdevs; i++) {
-			if (tmp->base_bdev[i].name != NULL) {
-				if (!strcmp(tmp->base_bdev[i].name, bdev_name)) {
-					SPDK_ERRLOG("duplicate base bdev name %s mentioned\n",
-						    base_bdev_name);
-					return -EEXIST;
-				}
-			}
-		}
-	}
 #endif
-
-	longhorn_cfg->base_bdev[slot].name = bdev_name;
-	if (longhorn_cfg->base_bdev[slot].name == NULL) {
-		SPDK_ERRLOG("unable to allocate memory\n");
-		return -ENOMEM;
-	}
-
-	return 0;
-}
 
 /*
  * brief:
@@ -1053,6 +838,7 @@ longhorn_bdev_get_ctx_size(void)
 	return sizeof(struct longhorn_bdev_io);
 }
 
+#if 0
 /*
  * brief:
  * longhorn_bdev_can_claim_bdev is the function to check if this base_bdev can be
@@ -1091,6 +877,7 @@ longhorn_bdev_can_claim_bdev(const char *bdev_name, struct longhorn_bdev_config 
 	return false;
 }
 
+#endif
 
 static struct spdk_bdev_module g_longhorn_if = {
 	.name = "longhorn",
@@ -1130,7 +917,7 @@ longhorn_bdev_init(void)
  */
 int
 //longhorn_bdev_create(struct longhorn_bdev_config *longhorn_cfg)
-longhorn_bdev_create(const char *name, uint8_t num_base_bdevs)
+longhorn_bdev_create(const char *name, const char *address, uint8_t num_base_bdevs)
 {
 	struct longhorn_bdev *longhorn_bdev;
 	struct spdk_bdev *longhorn_bdev_gen;
@@ -1142,19 +929,21 @@ longhorn_bdev_create(const char *name, uint8_t num_base_bdevs)
 		return -ENOMEM;
 	}
 
+	longhorn_bdev->name = strdup(name);
+
+	if (address != NULL && address[0] != '\0') {
+		longhorn_bdev->address = strdup(address);
+
+		longhorn_bdev->nqn = spdk_sprintf_alloc(VOLUME_FORMAT, address);
+	} else {
+		longhorn_bdev->nqn = spdk_sprintf_alloc(VOLUME_FORMAT, "127.0.0.1");
+	}
+
+
 	longhorn_bdev->io_ops = 0;
 	longhorn_bdev->num_base_bdevs = num_base_bdevs;
-	//longhorn_bdev->base_bdev_info = calloc(longhorn_bdev->num_base_bdevs,
-	// sizeof(struct longhorn_base_bdev_info));
-	//if (!longhorn_bdev->base_bdev_info) {
-//		SPDK_ERRLOG("Unable able to allocate base bdev info\n");
-//		free(longhorn_bdev);
-//		return -ENOMEM;
-//	}
-//
 
 	pthread_mutex_init(&longhorn_bdev->base_bdevs_mutex, NULL);
-
 
 	TAILQ_INIT(&longhorn_bdev->pause_cbs);
 	TAILQ_INIT(&longhorn_bdev->base_bdevs_head);
@@ -1225,8 +1014,6 @@ longhorn_bdev_alloc_base_bdev_resource(struct longhorn_bdev *longhorn_bdev, cons
 	SPDK_DEBUGLOG(bdev_longhorn, "bdev %s is claimed\n", bdev_name);
 
 	assert(longhorn_bdev->state != RAID_BDEV_STATE_ONLINE);
-	//assert(base_bdev_slot < longhorn_bdev->num_base_bdevs);
-
 
 	base_info = calloc(sizeof (struct longhorn_base_bdev_info), 1);
 
@@ -1270,13 +1057,8 @@ longhorn_bdev_configure_base_info(struct longhorn_bdev *longhorn_bdev,
 
 	SPDK_DEBUGLOG(bdev_longhorn, "bdev %s is claimed\n", base_info->bdev_name);
 
-	assert(longhorn_bdev->state != RAID_BDEV_STATE_ONLINE);
-	//assert(base_bdev_slot < longhorn_bdev->num_base_bdevs);
+	//assert(longhorn_bdev->state != RAID_BDEV_STATE_ONLINE);
 
-
-	//base_info = calloc(sizeof (struct longhorn_base_bdev_info), 1);
-
-	
 	base_info->thread = spdk_get_thread();
 	base_info->bdev = bdev;
 	base_info->desc = desc;
@@ -1366,8 +1148,15 @@ longhorn_bdev_configure(struct longhorn_bdev *longhorn_bdev)
 		      longhorn_bdev_gen->name, longhorn_bdev);
 
 	nqn = spdk_sprintf_alloc(VOLUME_FORMAT, longhorn_bdev_gen->name);
-	longhorn_publish_nvmf(longhorn_bdev_gen->name, nqn, "127.0.0.1", 
-			      4420, longhorn_bdev_nvmf_cb, NULL);
+
+	if (longhorn_bdev->address) {
+		longhorn_publish_nvmf(longhorn_bdev_gen->name, nqn, 
+				      longhorn_bdev->address, 
+			      	      4420, longhorn_bdev_nvmf_cb, NULL);
+	} else {
+		longhorn_publish_nvmf(longhorn_bdev_gen->name, nqn, "127.0.0.1", 
+			      	      4420, longhorn_bdev_nvmf_cb, NULL);
+	}
 
 
 	return 0;
@@ -1507,6 +1296,8 @@ longhorn_bdev_event_base_bdev(enum spdk_bdev_event_type type, struct spdk_bdev *
 	}
 }
 
+
+#if 0
 /*
  * brief:
  * Remove base bdevs from the longhorn bdev one by one.  Skip any base bdev which
@@ -1574,6 +1365,7 @@ longhorn_bdev_remove_base_devices(struct longhorn_bdev_config *longhorn_cfg,
 
 	longhorn_bdev_deconfigure(longhorn_bdev, cb_fn, cb_arg);
 }
+#endif
 
 /*
  * brief:
@@ -1608,10 +1400,17 @@ longhorn_bdev_add_base_device(struct longhorn_bdev *longhorn_bdev,
 	assert(longhorn_bdev->num_base_bdevs_discovered <= longhorn_bdev->num_base_bdevs);
 
 	if (longhorn_bdev->num_base_bdevs_discovered == longhorn_bdev->num_base_bdevs) {
-		rc = longhorn_bdev_configure(longhorn_bdev);
-		if (rc != 0) {
-			SPDK_ERRLOG("Failed to configure longhorn bdev\n");
-			return rc;
+		if (longhorn_bdev->configured) {
+			SPDK_DEBUGLOG(bdev_longhorn, "Device already configured\n");
+
+		} else {
+			rc = longhorn_bdev_configure(longhorn_bdev);
+			if (rc != 0) {
+				SPDK_ERRLOG("Failed to configure longhorn bdev\n");
+				return rc;
+			}
+
+			longhorn_bdev->configured = true;
 		}
 	}
 
@@ -1650,7 +1449,7 @@ generate_prefix(const char *name) {
 }
 
 int 
-longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port) {
+longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port, enum longhorn_base_bdev_state state) {
 	struct longhorn_bdev	*longhorn_bdev;
 	struct longhorn_base_bdev_info *base_info;
 	struct replica_add_ctx *ctx;
@@ -1664,6 +1463,7 @@ longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf
 
 	base_info = calloc(1, sizeof(*base_info));
 	base_info->lvs = strdup(lvs);
+	base_info->state = state;
 
 	if ((!addr || addr[0] == '\0')) {
 		base_info->is_local = true;
@@ -1683,7 +1483,7 @@ longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf
 		ctx->base_info = base_info;
 		ctx->prefix = generate_prefix(name);
 
-		SPDK_ERRLOG("attempting to attach %s\n", base_info->remote_nqn);
+		SPDK_DEBUGLOG(bdev_longhorn, "attempting to attach %s\n", base_info->remote_nqn);
 
 		longhorn_attach_nvmf(ctx->prefix, base_info->remote_nqn, addr, 
 				     nvmf_port, longhorn_replica_attach_cb, ctx);
@@ -1783,6 +1583,8 @@ longhorn_bdev_find_base_bdev(struct longhorn_bdev *longhorn_bdev, char *lvs, cha
 struct io_channel_remove_ctx {
 	struct longhorn_base_bdev_info  *base_info;
 	struct longhorn_bdev_io_channel *io_channel;
+
+	atomic_uint *num_io_channels_to_remove;
 };
 
 static struct longhorn_base_io_channel *
@@ -1808,9 +1610,15 @@ static void longhorn_io_channel_remove_bdev(void *arg) {
 
 	if (base_channel != NULL) {
 		
-		SPDK_ERRLOG("removing %p\n", base_channel);
+		SPDK_DEBUGLOG(bdev_longhorn, "removing %p\n", base_channel);
 		TAILQ_REMOVE(&ctx->io_channel->base_channels, base_channel, channels);
-		//1TAILQ_INSERT_TAIL(&longhorn_ch->base_channels, base_channel, channels);
+
+
+		spdk_put_io_channel(base_channel->base_channel);
+
+	
+		ctx->io_channel->num_channels--;
+
 		free(base_channel);
 
 	}
@@ -1818,18 +1626,84 @@ static void longhorn_io_channel_remove_bdev(void *arg) {
 	ctx->io_channel->last_read_io_ch = NULL;
 	
 	TAILQ_FOREACH(base_channel, &ctx->io_channel->base_channels, channels) {
-		SPDK_ERRLOG("Longhorn base bdev '%s' remaining %p\n", base_channel->base_info->lvs, base_channel);
+		SPDK_DEBUGLOG(bdev_longhorn, "Longhorn base bdev '%s' remaining %p\n", base_channel->base_info->lvs, base_channel);
 	}
 
 	/* TODO If this is the last io_channel to remove,
  	 * * unclaim the bdev 
  	 * * free the base_info */
+
+	SPDK_DEBUGLOG(bdev_longhorn, "io_channels_to_remove = %u\n", *ctx->num_io_channels_to_remove - 1);
+
+
+	atomic_fetch_sub(ctx->num_io_channels_to_remove, 1);
+
+	if (atomic_load(ctx->num_io_channels_to_remove) == 0) {
+		SPDK_DEBUGLOG(bdev_longhorn, "All io_channels removed\n");
+		free(ctx->num_io_channels_to_remove);
+
+		spdk_bdev_module_release_bdev(ctx->base_info->bdev);
+		spdk_thread_send_msg(ctx->base_info->thread, _longhorn_bdev_free_base_bdev_resource, ctx->base_info->desc);
+
+
+
+		free(ctx->base_info);
+	} 
+
+
 	
 	
 	free(ctx);
 }
 	
+struct io_channel_add_ctx {
+	struct longhorn_base_bdev_info  *base_info;
+	struct longhorn_bdev_io_channel *io_channel;
 
+	atomic_uint *num_io_channels_to_add;
+};
+
+static void longhorn_io_channel_add_bdev(void *arg) {
+	struct io_channel_add_ctx *ctx = arg;
+	struct longhorn_base_io_channel *base_channel;
+
+
+	base_channel = calloc(1, sizeof(*base_channel));
+	/*
+	 * Get the spdk_io_channel for all the base bdevs. This is used during
+	 * split logic to send the respective child bdev ios to respective base
+	 * bdev io channel.
+	 */
+	base_channel->base_channel = spdk_bdev_get_io_channel(ctx->base_info->desc);
+
+	base_channel->base_info = ctx->base_info;
+
+	if (!base_channel->base_channel) {
+		SPDK_ERRLOG("Unable to create io channel for base bdev\n");
+	}
+
+	ctx->io_channel->num_channels++;
+
+	TAILQ_INSERT_TAIL(&ctx->io_channel->base_channels, 
+			  base_channel, channels);
+
+
+
+	
+	SPDK_DEBUGLOG(bdev_longhorn, "io_channels_to_add = %u\n", *ctx->num_io_channels_to_add - 1);
+
+	atomic_fetch_sub(ctx->num_io_channels_to_add, 1);
+
+	if (atomic_load(ctx->num_io_channels_to_add) == 0) {
+		SPDK_DEBUGLOG(bdev_longhorn, "bdev added to all io_channels\n");
+
+		// TODO 
+	} 
+
+	
+	free(ctx);
+}
+	
 
 int longhorn_bdev_remove_replica(char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port) {
 	struct longhorn_bdev	*longhorn_bdev;
@@ -1837,6 +1711,7 @@ int longhorn_bdev_remove_replica(char *name, char *lvs, char *addr, uint16_t nvm
 	struct longhorn_bdev_io_channel *io_channel;
 	struct io_channel_remove_ctx *ctx;
 	int			rc;
+	atomic_uint *num_io_channels_to_remove;
 
 	longhorn_bdev = longhorn_bdev_find_by_name(name);
 	if (!longhorn_bdev) {
@@ -1868,19 +1743,76 @@ int longhorn_bdev_remove_replica(char *name, char *lvs, char *addr, uint16_t nvm
 
 	longhorn_bdev->num_base_bdevs_discovered--;
 	longhorn_bdev->num_base_bdevs--;
+
+        // claim	
+	
 	TAILQ_REMOVE(&longhorn_bdev->base_bdevs_head, base_info, infos);
 
 	/* signal each longhorn_io to stop using the bdev */
-		SPDK_ERRLOG("num io channels %u\n", longhorn_bdev->num_io_channels);
+	SPDK_DEBUGLOG(bdev_longhorn,"num io channels %u\n", longhorn_bdev->num_io_channels);
+
+	num_io_channels_to_remove = calloc(1, sizeof(atomic_int));
+	atomic_init(num_io_channels_to_remove, longhorn_bdev->num_io_channels);
+
 
 	TAILQ_FOREACH(io_channel, &longhorn_bdev->io_channel_head, channels) {
 		ctx = calloc(1, sizeof (*ctx));
 
 		ctx->base_info = base_info;
 		ctx->io_channel = io_channel;
+		ctx->num_io_channels_to_remove = num_io_channels_to_remove;
 		
 		if (!io_channel->deleted) {
 			spdk_thread_send_msg(io_channel->thread, longhorn_io_channel_remove_bdev, ctx);
+		}
+	}
+	
+	
+	pthread_mutex_unlock(&longhorn_bdev->base_bdevs_mutex);
+
+	return 0;
+}
+
+int longhorn_bdev_add_base_replica(struct longhorn_base_bdev_info *base_info) 
+{
+	struct longhorn_bdev	*longhorn_bdev;
+	struct longhorn_bdev_io_channel *io_channel;
+	struct io_channel_add_ctx *ctx;
+	int			rc;
+	atomic_uint *num_io_channels_to_add;
+
+	rc = pthread_mutex_trylock(&longhorn_bdev->base_bdevs_mutex);
+
+	if (rc != 0) {
+		if (errno == EBUSY) {
+			SPDK_ERRLOG("Longhorn bdev '%s' is busy\n", 
+				    longhorn_bdev->bdev.name);
+		}
+
+
+		return -errno;
+	}
+
+        // claim	
+	
+	TAILQ_REMOVE(&longhorn_bdev->base_bdevs_head, base_info, infos);
+
+	/* signal each longhorn_io to stop using the bdev */
+	SPDK_DEBUGLOG(bdev_longhorn,"num io channels %u\n", longhorn_bdev->num_io_channels);
+
+	num_io_channels_to_add = calloc(1, sizeof(atomic_int));
+	atomic_init(num_io_channels_to_add, longhorn_bdev->num_io_channels);
+
+
+	TAILQ_FOREACH(io_channel, &longhorn_bdev->io_channel_head, channels) {
+		ctx = calloc(1, sizeof (*ctx));
+
+		ctx->base_info = base_info;
+		ctx->io_channel = io_channel;
+		ctx->num_io_channels_to_add = num_io_channels_to_add;
+		
+		if (!io_channel->deleted) {
+			spdk_thread_send_msg(io_channel->thread, longhorn_io_channel_add_bdev, ctx);
 		}
 
 
@@ -1893,14 +1825,14 @@ int longhorn_bdev_remove_replica(char *name, char *lvs, char *addr, uint16_t nvm
 	return 0;
 }
 
-
 int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port) {
 	struct longhorn_bdev	*longhorn_bdev;
 	//struct longhorn_base_bdev_info	*base_info;
-	//struct longhorn_bdev_io_channel *io_channel;
+	struct longhorn_bdev_io_channel *io_channel;
 	//struct io_channel_remove_ctx *ctx;
 	int			rc;
 
+	/* Create base_info and add to base_info list */
 	longhorn_bdev = longhorn_bdev_find_by_name(name);
 	if (!longhorn_bdev) {
 		SPDK_ERRLOG("Longhorn bdev '%s' is not created yet\n", name);
@@ -1915,9 +1847,27 @@ int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf
 		}
 
 
-
 		return -errno;
 	}
+
+	longhorn_bdev->num_base_bdevs++;
+	longhorn_bdev_add_replica(name, lvs, addr, nvmf_port, comm_port, LONGHORN_BASE_BDEV_WO);
+
+        TAILQ_FOREACH(io_channel, &longhorn_bdev->io_channel_head, channels) {
+                spdk_thread_send_msg(io_channel->thread, bdev_longhorn_pause_io, io_channel);
+        }
+
+	longhorn_bdev->op_in_progress = true;
+	longhorn_bdev->op_in_progress = true;
+
+	pthread_mutex_unlock(&longhorn_bdev->base_bdevs_mutex);
+
+	/* pause writing */
+	/* snapshot the existing replicas and this new replica. */
+	/* add new replica to any open io_channels as write only */
+	/* rebuild all snapshots of the new replica */
+	/* reparent the new replica lvol */
+	/* mark the replica as read/write */
 
 	return 0;
 }
@@ -1928,19 +1878,20 @@ int longhorn_unpause(struct longhorn_bdev *longhorn_bdev)
 	struct longhorn_bdev_io_channel *io_channel;
 
 
-	rc = pthread_mutex_trylock(&longhorn_bdev->base_bdevs_mutex);
+	rc =pthread_mutex_trylock(&longhorn_bdev->base_bdevs_mutex);
 
 	if (rc != 0) {
 		return -errno;
 	}
 
 	TAILQ_FOREACH(io_channel, &longhorn_bdev->io_channel_head, channels) {
+		longhorn_pause_queue_playback(io_channel);
 		spdk_thread_send_msg(io_channel->thread, bdev_longhorn_unpause_io, io_channel);
 
 	}
 	
 	pthread_mutex_unlock(&longhorn_bdev->base_bdevs_mutex);
-	SPDK_ERRLOG("UNPAUSE COMPLETE \n");
+	SPDK_DEBUGLOG(bdev_longhorn,  "UNPAUSE COMPLETE \n");
 
 	return 0;
 }

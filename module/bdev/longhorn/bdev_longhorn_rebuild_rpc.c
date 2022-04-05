@@ -72,9 +72,6 @@ rpc_bdev_lvol_list_children(struct spdk_jsonrpc_request *request,
         struct spdk_bdev *bdev = NULL;
         struct spdk_lvol *lvol = NULL;
 	struct longhorn_child_blob_context *ctx = NULL;
-	//spdk_blob_id parent_id;
-
-
 
 	if (spdk_json_decode_object(params, rpc_lvol_list_children_decoders,
                                     SPDK_COUNTOF(rpc_lvol_list_children_decoders),
@@ -82,7 +79,6 @@ rpc_bdev_lvol_list_children(struct spdk_jsonrpc_request *request,
                 SPDK_DEBUGLOG(bdev_malloc, "spdk_json_decode_object failed\n");
                 spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
                                                  "spdk_json_decode_object failed");
-		//free_rpc_construct_malloc(&req);
 		return;
         }
 

@@ -67,6 +67,12 @@ enum longhorn_base_bdev_state {
 	LONGHORN_BASE_BDEV_ERR
 };
 
+enum longhorn_pause_operation {
+	LONGHORN_PAUSE_OP_NONE,
+	LONGHORN_PAUSE_OP_SNAPSHOT,
+	LONGHORN_PAUSE_OP_ADD,
+};
+
 /*
  * longhorn_base_bdev_info contains information for the base bdevs which are part of some
  * longhorn. This structure contains the per base bdev information. Whatever is
@@ -162,6 +168,10 @@ struct longhorn_bdev_io_channel {
 	TAILQ_ENTRY(longhorn_bdev_io_channel) channels;
 
 	struct longhorn_base_io_channel *last_read_io_ch;
+
+	TAILQ_HEAD(, spdk_bdev_io_wait_entry)   io_wait_queue;
+
+	uint32_t queue_len;
 };
 
 TAILQ_HEAD(io_channels, longhorn_bdev_io_channel);
@@ -182,6 +192,9 @@ struct longhorn_pause_cb_entry {
 struct longhorn_bdev {
 	/* longhorn bdev device, this will get registered in bdev layer */
 	struct spdk_bdev		bdev;
+	char *name; 
+	char *address;
+	char *nqn;
 
 	/* link of longhorn bdev to link it to configured, configuring or offline list */
 	TAILQ_ENTRY(longhorn_bdev)		state_link;
@@ -225,54 +238,14 @@ struct longhorn_bdev {
 	bool				destroy_started;
 
 	bool op_in_progress;
+	enum longhorn_pause_operation   pause_op;
 
+
+	bool configured;
 
 	atomic_int                      io_ops;
 	atomic_int                      channels_to_pause;
 
-};
-
-#define LONGHORN_FOR_EACH_BASE_BDEV(r, i) \
-	for (i = r->base_bdev_info; i < r->base_bdev_info + r->num_base_bdevs; i++)
-
-/*
- * longhorn_base_bdev_config is the per base bdev data structure which contains
- * information w.r.t to per base bdev during parsing config
- */
-struct longhorn_base_bdev_config {
-	/* base bdev name from config file */
-	char				*name;
-};
-
-/*
- * longhorn_bdev_config contains the longhorn bdev config related information after
- * parsing the config file
- */
-struct longhorn_bdev_config {
-	/* base bdev config per underlying bdev */
-	struct longhorn_base_bdev_config	*base_bdev;
-
-	/* Points to already created longhorn bdev  */
-	struct longhorn_bdev		*longhorn_bdev;
-
-	char				*name;
-
-	/* number of base bdevs */
-	uint8_t				num_base_bdevs;
-
-	TAILQ_ENTRY(longhorn_bdev_config)	link;
-};
-
-/*
- * longhorn_config is the top level structure representing the longhorn bdev config as read
- * from config file for all longhorns
- */
-struct longhorn_config {
-	/* longhorn bdev  context from config file */
-	TAILQ_HEAD(, longhorn_bdev_config) longhorn_bdev_config_head;
-
-	/* total longhorn bdev  from config file */
-	uint8_t total_longhorn_bdev;
 };
 
 /* TAIL heads for various longhorn bdev lists */
@@ -289,8 +262,7 @@ extern struct longhorn_config		g_longhorn_config;
 
 typedef void (*longhorn_bdev_destruct_cb)(void *cb_ctx, int rc);
 
-//int longhorn_bdev_create(struct longhorn_bdev_config *longhorn_cfg);
-int longhorn_bdev_create(const char *name, uint8_t num_base_bdevs);
+int longhorn_bdev_create(const char *name, const char *address, uint8_t num_base_bdevs);
 int longhorn_bdev_add_base_devices(struct longhorn_bdev_config *longhorn_cfg);
 void longhorn_bdev_remove_base_devices(struct longhorn_bdev_config *longhorn_cfg,
 				   longhorn_bdev_destruct_cb cb_fn, void *cb_ctx);
@@ -311,11 +283,10 @@ longhorn_bdev_queue_io_wait(struct longhorn_bdev_io *longhorn_io, struct spdk_bd
 void
 longhorn_bdev_io_complete(struct longhorn_bdev_io *longhorn_io, enum spdk_bdev_io_status status);
 
-//int longhorn_bdev_add_base_device(const char *name, const char *bdev_name);
 int longhorn_bdev_add_base_device(struct longhorn_bdev *longhorn_bdev, struct longhorn_base_bdev_info *base_info);
 int longhorn_bdev_remove_replica(char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port);
 int
-longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port);
+longhorn_bdev_add_replica(const char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port, enum longhorn_base_bdev_state state);
 
 void bdev_longhorn_pause_io(void *cb_arg);
 void bdev_longhorn_unpause_io(void *cb_arg);

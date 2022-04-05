@@ -21,6 +21,10 @@ struct block_diff {
 	uint64_t blocksize;
 	
 	uint64_t num_diff;
+
+	uint64_t size1;
+        uint64_t size2;
+
 };
 
 

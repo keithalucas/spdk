@@ -166,8 +166,9 @@ struct rpc_bdev_longhorn_create_base_bdevs {
  * Input structure for RPC rpc_bdev_longhorn_create
  */
 struct rpc_bdev_longhorn_create {
-	/* Raid bdev name */
+	/* longhorn bdev name */
 	char                                 *name;
+	char                                 *address;
 
 	/* Base bdevs information */
 	struct rpc_bdev_longhorn_create_base_bdevs base_bdevs;
@@ -244,6 +245,7 @@ decode_base_bdevs(const struct spdk_json_val *val, void *out)
  */
 static const struct spdk_json_object_decoder rpc_bdev_longhorn_create_decoders[] = {
 	{"name", offsetof(struct rpc_bdev_longhorn_create, name), spdk_json_decode_string},
+	{"address", offsetof(struct rpc_bdev_longhorn_create, address), spdk_json_decode_string, true},
 	{"replicas", offsetof(struct rpc_bdev_longhorn_create, base_bdevs), decode_base_bdevs},
 };
 
@@ -262,12 +264,11 @@ rpc_bdev_longhorn_create(struct spdk_jsonrpc_request *request,
 		     const struct spdk_json_val *params)
 {
 	struct rpc_bdev_longhorn_create	req = {};
-	struct longhorn_bdev_config		*longhorn_cfg;
+	//struct longhorn_bdev_config		*longhorn_cfg;
 	int				rc;
 	size_t				i;
-	char *bdev_name;
+	//struct spdk_json_write_ctx *w;
 
-	printf("type %d\n", params->type);
 	if (spdk_json_decode_object(params, rpc_bdev_longhorn_create_decoders,
 				    SPDK_COUNTOF(rpc_bdev_longhorn_create_decoders),
 				    &req)) {
@@ -276,30 +277,7 @@ rpc_bdev_longhorn_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-#if 0
-	rc = longhorn_bdev_config_add(req.name, req.base_bdevs.num_base_bdevs,
-				  &longhorn_cfg);
-	if (rc != 0) {
-		spdk_jsonrpc_send_error_response_fmt(request, rc,
-						     "Failed to add RAID bdev config %s: %s",
-						     req.name, spdk_strerror(-rc));
-		goto cleanup;
-	}
-
-	for (i = 0; i < req.base_bdevs.num_base_bdevs; i++) {
-		rc = longhorn_bdev_config_add_base_bdev(longhorn_cfg, req.base_bdevs.replicas[i].lvs, i);
-		if (rc != 0) {
-			longhorn_bdev_config_cleanup(longhorn_cfg);
-			spdk_jsonrpc_send_error_response_fmt(request, rc,
-							     "Failed to add base bdev %s to RAID bdev config %s: %s",
-							     req.base_bdevs.replicas[i].addr, req.name,
-							     spdk_strerror(-rc));
-			goto cleanup;
-		}
-	}
-#endif
-
-	rc = longhorn_bdev_create(req.name, req.base_bdevs.num_base_bdevs);
+	rc = longhorn_bdev_create(req.name, req.address, req.base_bdevs.num_base_bdevs);
 	if (rc != 0) {
 		//longhorn_bdev_config_cleanup(longhorn_cfg);
 		spdk_jsonrpc_send_error_response_fmt(request, rc,
@@ -312,26 +290,16 @@ rpc_bdev_longhorn_create(struct spdk_jsonrpc_request *request,
 
 		//longhorn_bdev_add_base_device(req.name, bdev_name);
 
-		longhorn_bdev_add_replica(req.name, req.base_bdevs.replicas[i].lvs, req.base_bdevs.replicas[i].addr, req.base_bdevs.replicas[i].nvmf_port, req.base_bdevs.replicas[i].comm_port);
+		longhorn_bdev_add_replica(req.name, req.base_bdevs.replicas[i].lvs, req.base_bdevs.replicas[i].addr, req.base_bdevs.replicas[i].nvmf_port, req.base_bdevs.replicas[i].comm_port, LONGHORN_BASE_BDEV_RW);
 
-		free(bdev_name);
 	}
-
-#if 0
-	
-
-	rc = longhorn_bdev_add_base_devices(longhorn_cfg);
-	if (rc != 0) {
-		spdk_jsonrpc_send_error_response_fmt(request, rc,
-						     "Failed to add any base bdev to RAID bdev %s: %s",
-						     req.name, spdk_strerror(-rc));
-		goto cleanup;
-	}
-#endif
 
 
 
 	spdk_jsonrpc_send_bool_response(request, true);
+
+
+
 
 cleanup:
 	free_rpc_bdev_longhorn_create(&req);
@@ -375,7 +343,7 @@ rpc_bdev_longhorn_add_replica_cmd(struct spdk_jsonrpc_request *request,
 		     const struct spdk_json_val *params)
 {
 	struct rpc_bdev_longhorn_add_replica	req = {};
-	struct longhorn_bdev_config		*longhorn_cfg;
+	//struct longhorn_bdev_config		*longhorn_cfg;
 	int				rc;
 	size_t				i;
 	char *bdev_name;
@@ -387,6 +355,16 @@ rpc_bdev_longhorn_add_replica_cmd(struct spdk_jsonrpc_request *request,
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 						 "longhorn spdk_json_decode_object failed");
 	}
+
+	rc = longhorn_volume_add_replica(req.name, req.replica.lvs, req.replica.addr, req.replica.nvmf_port, req.replica.comm_port);
+
+	if (rc != 0) {
+                spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "failed to add replica");
+        } else {
+                spdk_jsonrpc_send_bool_response(request, true);
+
+        }
+
 }
 
 SPDK_RPC_REGISTER("longhorn_volume_add_replica", rpc_bdev_longhorn_add_replica_cmd, SPDK_RPC_RUNTIME)
@@ -396,7 +374,7 @@ rpc_bdev_longhorn_remove_replica_cmd(struct spdk_jsonrpc_request *request,
 		     const struct spdk_json_val *params)
 {
 	struct rpc_bdev_longhorn_add_replica	req = {};
-	struct longhorn_bdev_config		*longhorn_cfg;
+	//struct longhorn_bdev_config		*longhorn_cfg;
 	int				rc;
 	size_t				i;
 	char *bdev_name;
@@ -455,7 +433,7 @@ static const struct spdk_json_object_decoder rpc_bdev_longhorn_delete_decoders[]
 
 struct rpc_bdev_longhorn_delete_ctx {
 	struct rpc_bdev_longhorn_delete req;
-	struct longhorn_bdev_config *longhorn_cfg;
+	//struct longhorn_bdev_config *longhorn_cfg;
 	struct spdk_jsonrpc_request *request;
 };
 
@@ -471,7 +449,7 @@ static void
 bdev_longhorn_delete_done(void *cb_arg, int rc)
 {
 	struct rpc_bdev_longhorn_delete_ctx *ctx = cb_arg;
-	struct longhorn_bdev_config *longhorn_cfg;
+//	struct longhorn_bdev_config *longhorn_cfg;
 	struct spdk_jsonrpc_request *request = ctx->request;
 
 	if (rc != 0) {
@@ -482,10 +460,12 @@ bdev_longhorn_delete_done(void *cb_arg, int rc)
 		goto exit;
 	}
 
+#if 0
 	longhorn_cfg = ctx->longhorn_cfg;
 	assert(longhorn_cfg->longhorn_bdev == NULL);
 
 	longhorn_bdev_config_cleanup(longhorn_cfg);
+#endif
 
 	spdk_jsonrpc_send_bool_response(request, true);
 exit:
@@ -524,6 +504,7 @@ rpc_bdev_longhorn_delete(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
  
+#if 0
 	ctx->longhorn_cfg = longhorn_bdev_config_find_by_name(ctx->req.name);
 	if (ctx->longhorn_cfg == NULL) {
 		spdk_jsonrpc_send_error_response_fmt(request, ENODEV,
@@ -531,11 +512,12 @@ rpc_bdev_longhorn_delete(struct spdk_jsonrpc_request *request,
 						     ctx->req.name);
 		goto cleanup;
 	}
+#endif
 
 	ctx->request = request;
 
 	/* Remove all the base bdevs from this longhorn bdev before deleting the longhorn bdev */
-	longhorn_bdev_remove_base_devices(ctx->longhorn_cfg, bdev_longhorn_delete_done, ctx);
+	//longhorn_bdev_remove_base_devices(ctx->longhorn_cfg, bdev_longhorn_delete_done, ctx);
 
 	return;
 
@@ -898,7 +880,7 @@ static void rpc_longhorn_snapshot_cmd(struct spdk_jsonrpc_request *request,
 {
 	struct rpc_bdev_longhorn_snapshot req;
 	struct rpc_bdev_longhorn_snapshot_ctx *ctx;
-	struct longhorn_bdev_config *longhorn_cfg;
+	//struct longhorn_bdev_config *longhorn_cfg;
 
 	if (spdk_json_decode_object(params, rpc_bdev_longhorn_snapshot_decoders,
 				    SPDK_COUNTOF(rpc_bdev_longhorn_snapshot_decoders),
@@ -909,6 +891,7 @@ static void rpc_longhorn_snapshot_cmd(struct spdk_jsonrpc_request *request,
 	}
 
 
+#if 0
 	longhorn_cfg = longhorn_bdev_config_find_by_name(req.name);
 	if (longhorn_cfg == NULL) {
 		spdk_jsonrpc_send_error_response_fmt(request, ENODEV,
@@ -916,6 +899,7 @@ static void rpc_longhorn_snapshot_cmd(struct spdk_jsonrpc_request *request,
 						     req.name);
 //goto cleanup;
 	}
+#endif
 
 
 	ctx = calloc(1, sizeof(*ctx));

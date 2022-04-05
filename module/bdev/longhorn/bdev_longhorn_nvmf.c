@@ -133,7 +133,7 @@ struct longhorn_publish_nvmf_ctx {
 	void *cb_arg;
 };
 
-void longhorn_publish_nvmf(const char *bdev_name, const char *nqn, const char *addr, uint16_t port, longhorn_publish_nvmf_cb cb_fn, void *cb_arg) { 
+static void _longhorn_publish_nvmf(const char *bdev_name, const char *nqn, const char *addr, uint16_t port, longhorn_publish_nvmf_cb cb_fn, void *cb_arg) { 
 	struct spdk_nvmf_tgt *tgt;
 	struct spdk_nvmf_subsystem      *subsystem;
         struct spdk_nvmf_ns_opts ns_opts;
@@ -162,6 +162,52 @@ void longhorn_publish_nvmf(const char *bdev_name, const char *nqn, const char *a
 	spdk_nvmf_subsystem_start(subsystem, longhorn_subsystem_add_done, NULL);
 
 }
+
+struct longhorn_publish_nvmf_no_transport_ctx {
+	const char *bdev_name;
+	const char *nqn;
+	const char *addr;
+	uint16_t port;
+	longhorn_publish_nvmf_cb cb_fn;
+	void *cb_arg;
+};
+
+static void longhorn_publish_no_transport_cb(void *cb_arg) {
+	struct longhorn_publish_nvmf_no_transport_ctx *ctx = cb_arg;
+
+	_longhorn_publish_nvmf(ctx->bdev_name, ctx->nqn, ctx->addr, ctx->port, 
+			       ctx->cb_fn, ctx->cb_arg);
+
+	free(ctx->bdev_name);
+	free(ctx->nqn);
+	free(ctx->addr);
+
+	free(ctx);
+}
+
+
+void longhorn_publish_nvmf(const char *bdev_name, const char *nqn, const char *addr, uint16_t port, longhorn_publish_nvmf_cb cb_fn, void *cb_arg) { 
+
+	if (tcp_transport_created) {
+		_longhorn_publish_nvmf(bdev_name, nqn, addr, port, cb_fn, cb_arg);
+	} else {
+		struct longhorn_publish_nvmf_no_transport_ctx *ctx;
+
+		ctx = calloc(1, sizeof(*ctx));
+
+		ctx->bdev_name = strdup(bdev_name);
+		ctx->nqn = strdup(nqn);
+		ctx->addr = strdup(addr);
+
+		ctx->port = port;
+		ctx->cb_fn = cb_fn;
+		ctx->cb_arg = cb_arg;
+
+		longhorn_nvmf_create_transport(longhorn_publish_no_transport_cb,
+					       ctx);
+	}
+}
+
 
 #define NVME_MAX_BDEVS_PER_RPC 128
 
