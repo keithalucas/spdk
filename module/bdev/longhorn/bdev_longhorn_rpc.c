@@ -121,19 +121,31 @@ rpc_bdev_longhorn_get_bdevs(struct spdk_jsonrpc_request *request,
 	/* Get longhorn bdev list based on the category requested */
 	if (strcmp(req.category, "all") == 0) {
 		TAILQ_FOREACH(longhorn_bdev, &g_longhorn_bdev_list, global_link) {
-			spdk_json_write_string(w, longhorn_bdev->bdev.name);
+			spdk_json_write_object_begin(w);
+			spdk_json_write_named_string(w, "name", longhorn_bdev->name);
+			longhorn_bdev_dump_info_json(longhorn_bdev, w);
+			spdk_json_write_object_end(w);
 		}
 	} else if (strcmp(req.category, "online") == 0) {
 		TAILQ_FOREACH(longhorn_bdev, &g_longhorn_bdev_configured_list, state_link) {
-			spdk_json_write_string(w, longhorn_bdev->bdev.name);
+			spdk_json_write_object_begin(w);
+			spdk_json_write_named_string(w, "name", longhorn_bdev->name);
+			longhorn_bdev_dump_info_json(longhorn_bdev, w);
+			spdk_json_write_object_end(w);
 		}
 	} else if (strcmp(req.category, "configuring") == 0) {
 		TAILQ_FOREACH(longhorn_bdev, &g_longhorn_bdev_configuring_list, state_link) {
-			spdk_json_write_string(w, longhorn_bdev->bdev.name);
+			spdk_json_write_object_begin(w);
+			spdk_json_write_named_string(w, "name", longhorn_bdev->name);
+			longhorn_bdev_dump_info_json(longhorn_bdev, w);
+			spdk_json_write_object_end(w);
 		}
 	} else {
 		TAILQ_FOREACH(longhorn_bdev, &g_longhorn_bdev_offline_list, state_link) {
-			spdk_json_write_string(w, longhorn_bdev->bdev.name);
+			spdk_json_write_object_begin(w);
+			spdk_json_write_named_string(w, "name", longhorn_bdev->name);
+			longhorn_bdev_dump_info_json(longhorn_bdev, w);
+			spdk_json_write_object_end(w);
 		}
 	}
 	spdk_json_write_array_end(w);
@@ -144,6 +156,7 @@ cleanup:
 }
 SPDK_RPC_REGISTER("bdev_longhorn_get_bdevs", rpc_bdev_longhorn_get_bdevs, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_longhorn_get_bdevs, get_longhorn_bdevs)
+SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_longhorn_get_bdevs, longhorn_volume_list)
 
 struct longhorn_replica {
 	char *addr;
@@ -460,12 +473,6 @@ bdev_longhorn_delete_done(void *cb_arg, int rc)
 		goto exit;
 	}
 
-#if 0
-	longhorn_cfg = ctx->longhorn_cfg;
-	assert(longhorn_cfg->longhorn_bdev == NULL);
-
-	longhorn_bdev_config_cleanup(longhorn_cfg);
-#endif
 
 	spdk_jsonrpc_send_bool_response(request, true);
 exit:
@@ -504,20 +511,11 @@ rpc_bdev_longhorn_delete(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
  
-#if 0
-	ctx->longhorn_cfg = longhorn_bdev_config_find_by_name(ctx->req.name);
-	if (ctx->longhorn_cfg == NULL) {
-		spdk_jsonrpc_send_error_response_fmt(request, ENODEV,
-						     "longhorn bdev %s is not found in config",
-						     ctx->req.name);
-		goto cleanup;
-	}
-#endif
-
 	ctx->request = request;
 
 	/* Remove all the base bdevs from this longhorn bdev before deleting the longhorn bdev */
-	//longhorn_bdev_remove_base_devices(ctx->longhorn_cfg, bdev_longhorn_delete_done, ctx);
+	longhorn_bdev_remove_base_devices(ctx->req.name, bdev_longhorn_delete_done, ctx);
+	
 
 	return;
 
@@ -527,6 +525,7 @@ cleanup:
 }
 SPDK_RPC_REGISTER("bdev_longhorn_delete", rpc_bdev_longhorn_delete, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_longhorn_delete, destroy_longhorn_bdev)
+SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_longhorn_delete, longhorn_volume_stop)
 
 struct cluster_entry {
 	int cluster;

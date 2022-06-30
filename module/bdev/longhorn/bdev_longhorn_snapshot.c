@@ -336,7 +336,7 @@ static void longhorn_bdev_snapshot(void *arg)
 
 
 
-static void longhorn_snapshot_pause_complete(struct longhorn_bdev *bdev, 
+void longhorn_snapshot_pause_complete(struct longhorn_bdev *bdev, 
 					     void *arg) {
 	struct longhorn_snapshot_ctx *ctx = arg;
 	ctx->bdev = bdev;

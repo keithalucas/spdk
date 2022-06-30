@@ -167,6 +167,8 @@ static void longhorn_check_pause_complete(struct longhorn_bdev *longhorn_bdev)
 	}
 
 	TAILQ_INIT(&longhorn_bdev->pause_cbs);
+
+
 }
 
 void bdev_longhorn_pause_io(void *cb_arg) {
@@ -279,11 +281,6 @@ longhorn_bdev_cleanup(struct longhorn_bdev *longhorn_bdev)
 	free(longhorn_bdev->bdev.name);
 	free(longhorn_bdev->base_bdev_info);
 
-#if 0
-	if (longhorn_bdev->config) {
-		longhorn_bdev->config->longhorn_bdev = NULL;
-	}
-#endif
 	free(longhorn_bdev);
 }
 
@@ -330,6 +327,11 @@ longhorn_bdev_free_base_bdev_resource(struct longhorn_bdev *longhorn_bdev,
 	longhorn_bdev->num_base_bdevs_discovered--;
 }
 
+static void
+longhorn_volume_nvmf_stop(struct spdk_nvmf_subsystem *subsystem,
+                          void *arg, int status) 
+{
+}
 /*
  * brief:
  * longhorn_bdev_destruct is the destruct function table pointer for longhorn bdev
@@ -344,8 +346,19 @@ longhorn_bdev_destruct(void *ctxt)
 {
 	struct longhorn_bdev *longhorn_bdev = ctxt;
 	struct longhorn_base_bdev_info *base_info;
+	struct spdk_nvmf_tgt *tgt;
+        struct spdk_nvmf_subsystem      *subsystem;
 
 	SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_destruct\n");
+	SPDK_ERRLOG("longhorn_bdev_destruct\n");
+
+
+	tgt = spdk_nvmf_get_tgt(NULL);
+	subsystem = spdk_nvmf_tgt_find_subsystem(tgt, longhorn_bdev->nqn);
+
+	if (subsystem != NULL) {
+		spdk_nvmf_subsystem_stop(subsystem, longhorn_volume_nvmf_stop, NULL);
+	}
 
 	longhorn_bdev->destruct_called = true;
 	//LONGHORN_FOR_EACH_BASE_BDEV(longhorn_bdev, base_info) {
@@ -549,6 +562,12 @@ longhorn_bdev_get_io_channel(void *ctxt)
 
 	return spdk_get_io_channel(longhorn_bdev);
 }
+static int
+_longhorn_bdev_dump_info_json(void *ctx, struct spdk_json_write_ctx *w) {
+	struct longhorn_bdev *bdev = ctx;
+	return longhorn_bdev_dump_info_json(bdev, w);
+}
+
 
 /*
  * brief:
@@ -560,10 +579,10 @@ longhorn_bdev_get_io_channel(void *ctxt)
  * 0 - success
  * non zero - failure
  */
-static int
-longhorn_bdev_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
+int
+longhorn_bdev_dump_info_json(struct longhorn_bdev *longhorn_bdev, struct spdk_json_write_ctx *w)
+
 {
-	struct longhorn_bdev *longhorn_bdev = ctx;
 	struct longhorn_base_bdev_info *base_info;
 
 	SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_dump_config_json\n");
@@ -614,7 +633,6 @@ longhorn_bdev_write_config_json(struct spdk_bdev *bdev, struct spdk_json_write_c
 	spdk_json_write_named_string(w, "name", bdev->name);
 
 	spdk_json_write_named_array_begin(w, "base_bdevs");
-	//LONGHORN_FOR_EACH_BASE_BDEV(longhorn_bdev, base_info) {
 	TAILQ_FOREACH(base_info, &longhorn_bdev->base_bdevs_head, infos) {
 		if (base_info->bdev) {
 			spdk_json_write_string(w, base_info->bdev->name);
@@ -632,7 +650,7 @@ static const struct spdk_bdev_fn_table g_longhorn_bdev_fn_table = {
 	.submit_request		= longhorn_bdev_submit_request,
 	.io_type_supported	= longhorn_bdev_io_type_supported,
 	.get_io_channel		= longhorn_bdev_get_io_channel,
-	.dump_info_json		= longhorn_bdev_dump_info_json,
+	.dump_info_json		= _longhorn_bdev_dump_info_json,
 	.write_config_json	= longhorn_bdev_write_config_json,
 };
 
@@ -933,12 +951,11 @@ longhorn_bdev_create(const char *name, const char *address, uint8_t num_base_bde
 
 	if (address != NULL && address[0] != '\0') {
 		longhorn_bdev->address = strdup(address);
-
-		longhorn_bdev->nqn = spdk_sprintf_alloc(VOLUME_FORMAT, address);
 	} else {
-		longhorn_bdev->nqn = spdk_sprintf_alloc(VOLUME_FORMAT, "127.0.0.1");
+		longhorn_bdev->address = strdup("127.0.0.1");
 	}
 
+	longhorn_bdev->nqn = longhorn_generate_volume_nqn(name);
 
 	longhorn_bdev->io_ops = 0;
 	longhorn_bdev->num_base_bdevs = num_base_bdevs;
@@ -1092,7 +1109,6 @@ longhorn_bdev_configure(struct longhorn_bdev *longhorn_bdev)
 	struct spdk_bdev *longhorn_bdev_gen;
 	struct longhorn_base_bdev_info *base_info;
 	int rc = 0;
-	char *nqn;
 
 	assert(longhorn_bdev->state == RAID_BDEV_STATE_CONFIGURING);
 	assert(longhorn_bdev->num_base_bdevs_discovered == longhorn_bdev->num_base_bdevs);
@@ -1147,14 +1163,13 @@ longhorn_bdev_configure(struct longhorn_bdev *longhorn_bdev)
 	SPDK_DEBUGLOG(bdev_longhorn, "longhorn bdev is created with name %s, longhorn_bdev %p\n",
 		      longhorn_bdev_gen->name, longhorn_bdev);
 
-	nqn = spdk_sprintf_alloc(VOLUME_FORMAT, longhorn_bdev_gen->name);
 
 	if (longhorn_bdev->address) {
-		longhorn_publish_nvmf(longhorn_bdev_gen->name, nqn, 
+		longhorn_publish_nvmf(longhorn_bdev_gen->name, longhorn_bdev->nqn, 
 				      longhorn_bdev->address, 
 			      	      4420, longhorn_bdev_nvmf_cb, NULL);
 	} else {
-		longhorn_publish_nvmf(longhorn_bdev_gen->name, nqn, "127.0.0.1", 
+		longhorn_publish_nvmf(longhorn_bdev_gen->name, longhorn_bdev->nqn, "127.0.0.1", 
 			      	      4420, longhorn_bdev_nvmf_cb, NULL);
 	}
 
@@ -1297,7 +1312,6 @@ longhorn_bdev_event_base_bdev(enum spdk_bdev_event_type type, struct spdk_bdev *
 }
 
 
-#if 0
 /*
  * brief:
  * Remove base bdevs from the longhorn bdev one by one.  Skip any base bdev which
@@ -1308,17 +1322,17 @@ longhorn_bdev_event_base_bdev(enum spdk_bdev_event_type type, struct spdk_bdev *
  * cb_ctx - argument to callback function
  */
 void
-longhorn_bdev_remove_base_devices(struct longhorn_bdev_config *longhorn_cfg,
+longhorn_bdev_remove_base_devices(const char *longhorn_name,
 			      longhorn_bdev_destruct_cb cb_fn, void *cb_arg)
 {
 	struct longhorn_bdev		*longhorn_bdev;
 	struct longhorn_base_bdev_info	*base_info;
 
 	SPDK_DEBUGLOG(bdev_longhorn, "longhorn_bdev_remove_base_devices\n");
+	longhorn_bdev = longhorn_bdev_find_by_name(longhorn_name);
 
-	longhorn_bdev = longhorn_cfg->longhorn_bdev;
 	if (longhorn_bdev == NULL) {
-		SPDK_DEBUGLOG(bdev_longhorn, "longhorn bdev %s doesn't exist now\n", longhorn_cfg->name);
+		SPDK_DEBUGLOG(bdev_longhorn, "longhorn bdev %s doesn't exist now\n", longhorn_name);
 		if (cb_fn) {
 			cb_fn(cb_arg, 0);
 		}
@@ -1336,7 +1350,6 @@ longhorn_bdev_remove_base_devices(struct longhorn_bdev_config *longhorn_cfg,
 
 	longhorn_bdev->destroy_started = true;
 
-	//LONGHORN_FOR_EACH_BASE_BDEV(longhorn_bdev, base_info) {
 	TAILQ_FOREACH(base_info, &longhorn_bdev->base_bdevs_head, infos) {
 		if (base_info->bdev == NULL) {
 			continue;
@@ -1365,7 +1378,6 @@ longhorn_bdev_remove_base_devices(struct longhorn_bdev_config *longhorn_cfg,
 
 	longhorn_bdev_deconfigure(longhorn_bdev, cb_fn, cb_arg);
 }
-#endif
 
 /*
  * brief:
@@ -1773,63 +1785,9 @@ int longhorn_bdev_remove_replica(char *name, char *lvs, char *addr, uint16_t nvm
 	return 0;
 }
 
-int longhorn_bdev_add_base_replica(struct longhorn_base_bdev_info *base_info) 
-{
-	struct longhorn_bdev	*longhorn_bdev;
-	struct longhorn_bdev_io_channel *io_channel;
-	struct io_channel_add_ctx *ctx;
-	int			rc;
-	atomic_uint *num_io_channels_to_add;
-
-	rc = pthread_mutex_trylock(&longhorn_bdev->base_bdevs_mutex);
-
-	if (rc != 0) {
-		if (errno == EBUSY) {
-			SPDK_ERRLOG("Longhorn bdev '%s' is busy\n", 
-				    longhorn_bdev->bdev.name);
-		}
-
-
-		return -errno;
-	}
-
-        // claim	
-	
-	TAILQ_REMOVE(&longhorn_bdev->base_bdevs_head, base_info, infos);
-
-	/* signal each longhorn_io to stop using the bdev */
-	SPDK_DEBUGLOG(bdev_longhorn,"num io channels %u\n", longhorn_bdev->num_io_channels);
-
-	num_io_channels_to_add = calloc(1, sizeof(atomic_int));
-	atomic_init(num_io_channels_to_add, longhorn_bdev->num_io_channels);
-
-
-	TAILQ_FOREACH(io_channel, &longhorn_bdev->io_channel_head, channels) {
-		ctx = calloc(1, sizeof (*ctx));
-
-		ctx->base_info = base_info;
-		ctx->io_channel = io_channel;
-		ctx->num_io_channels_to_add = num_io_channels_to_add;
-		
-		if (!io_channel->deleted) {
-			spdk_thread_send_msg(io_channel->thread, longhorn_io_channel_add_bdev, ctx);
-		}
-
-
-	}
-	
-	pthread_mutex_unlock(&longhorn_bdev->base_bdevs_mutex);
-
-
-
-	return 0;
-}
-
 int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port) {
 	struct longhorn_bdev	*longhorn_bdev;
-	//struct longhorn_base_bdev_info	*base_info;
 	struct longhorn_bdev_io_channel *io_channel;
-	//struct io_channel_remove_ctx *ctx;
 	int			rc;
 
 	/* Create base_info and add to base_info list */
@@ -1858,7 +1816,7 @@ int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf
         }
 
 	longhorn_bdev->op_in_progress = true;
-	longhorn_bdev->op_in_progress = true;
+	longhorn_bdev->pause_op = LONGHORN_PAUSE_OP_ADD;
 
 	pthread_mutex_unlock(&longhorn_bdev->base_bdevs_mutex);
 

@@ -1,11 +1,19 @@
 #include "spdk/nvmf.h"
 #include "spdk/string.h"
 #include "spdk/util.h"
+#include "spdk/bdev.h"
+
 
 #include "bdev_longhorn_nvmf.h"
 
 
 static bool tcp_transport_created = false;
+
+struct longhorn_publish_nvmf_ctx {
+	longhorn_publish_nvmf_cb cb_fn;
+	void *cb_arg;
+};
+
 
 static void
 longhorn_tgt_add_transport_done(void *cb_arg, int status)
@@ -20,6 +28,13 @@ longhorn_tgt_add_transport_done(void *cb_arg, int status)
 static void
 longhorn_subsystem_add_done(struct spdk_nvmf_subsystem *subsystem,
 			    void *cb_arg, int status) {
+	struct longhorn_publish_nvmf_ctx *ctx = cb_arg;
+
+	if (ctx != NULL) {
+		(*ctx->cb_fn)(ctx->cb_arg);
+
+		free(ctx);
+	}
 }
 
 void longhorn_nvmf_create_transport(spdk_nvmf_tgt_add_transport_done_fn cb_fn,
@@ -32,6 +47,11 @@ void longhorn_nvmf_create_transport(spdk_nvmf_tgt_add_transport_done_fn cb_fn,
 	tgt = spdk_nvmf_get_tgt(NULL);
 
 	transport = spdk_nvmf_transport_create("tcp", &opts);
+
+	if (transport == NULL) {
+	} else {
+		tcp_transport_created = true;
+	}
 
 	if (cb_fn != NULL) {
 		spdk_nvmf_tgt_add_transport(tgt, transport, cb_fn, cb_arg);
@@ -128,22 +148,22 @@ void longhorn_nvmf_subsystem_add_ns(const char *nqn, const char *bdev_name) {
 	spdk_nvmf_subsystem_pause(subsystem, 0, add_ns_pause_cb, bdev_name);
 }
 
-struct longhorn_publish_nvmf_ctx {
-	longhorn_publish_nvmf_cb cb_fn;
-	void *cb_arg;
-};
-
 static void _longhorn_publish_nvmf(const char *bdev_name, const char *nqn, const char *addr, uint16_t port, longhorn_publish_nvmf_cb cb_fn, void *cb_arg) { 
 	struct spdk_nvmf_tgt *tgt;
 	struct spdk_nvmf_subsystem      *subsystem;
         struct spdk_nvmf_ns_opts ns_opts;
         struct spdk_nvmf_listen_opts listen_opts;
         struct spdk_nvme_transport_id *trid;
+	struct longhorn_publish_nvmf_ctx *ctx;
 
 	tgt = spdk_nvmf_get_tgt(NULL);
 
-	subsystem = spdk_nvmf_subsystem_create(tgt, nqn, SPDK_NVMF_SUBTYPE_NVME,
-                                               0);
+	subsystem = spdk_nvmf_tgt_find_subsystem(tgt, nqn);
+
+	if (subsystem == NULL) {
+		subsystem = spdk_nvmf_subsystem_create(tgt, nqn, SPDK_NVMF_SUBTYPE_NVME,
+                                               	       0);
+	}
 
 	spdk_nvmf_subsystem_set_allow_any_host(subsystem, true);
 
@@ -159,7 +179,11 @@ static void _longhorn_publish_nvmf(const char *bdev_name, const char *nqn, const
 	spdk_nvmf_tgt_listen_ext(tgt, trid, &listen_opts);
 	spdk_nvmf_subsystem_add_listener(subsystem, trid, add_listener_cb, trid);
 
-	spdk_nvmf_subsystem_start(subsystem, longhorn_subsystem_add_done, NULL);
+	ctx = calloc(1, sizeof(*ctx));
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	spdk_nvmf_subsystem_start(subsystem, longhorn_subsystem_add_done, ctx);
 
 }
 
@@ -247,7 +271,6 @@ void longhorn_attach_nvmf(const char *bdev_name_prefix, const char *nqn,
 			  longhorn_attach_nvmf_cb cb_fn, void *cb_arg) {
         struct spdk_nvme_transport_id *trid;
 	size_t len;
-	struct spdk_nvme_host_id hostid = {};
         uint32_t prchk_flags = 0;
 	struct longhorn_attach_nvmf_ctx *ctx;
 
@@ -267,8 +290,9 @@ void longhorn_attach_nvmf(const char *bdev_name_prefix, const char *nqn,
 
 	spdk_nvme_ctrlr_get_default_ctrlr_opts(&ctx->opts, sizeof(ctx->opts));
 
-	bdev_nvme_create(trid, &hostid, bdev_name_prefix, ctx->names, ctx->count, 
-			 prchk_flags, longhorn_nvme_create_cb, ctx, &ctx->opts);
+	bdev_nvme_create(trid, bdev_name_prefix, ctx->names, ctx->count, 
+			 prchk_flags, longhorn_nvme_create_cb, ctx, &ctx->opts,
+			 false, 0, 0, 0);
 
 }
 
@@ -322,5 +346,21 @@ longhorn_generate_replica_nqn(const char *lvs, const char *name) {
 	return nqn;
 }
 
+char *
+longhorn_generate_volume_nqn(const char *name) {
+	char *nqn = spdk_sprintf_alloc(VOLUME_FORMAT, name);
+	return nqn;
+}
 
+char *
+longhorn_generate_snapshot_nqn(const char *name) {
+	char *nqn = spdk_sprintf_alloc(SNAPSHOT_FORMAT, name);
+	return nqn;
+}
+
+char *
+longhorn_generate_replica_snapshot_nqn(const char *lvs, const char *name) {
+	char *nqn = spdk_sprintf_alloc(REPLICA_SNAPSHOT_FORMAT, lvs, name);
+	return nqn;
+}
 

@@ -264,7 +264,7 @@ typedef void (*longhorn_bdev_destruct_cb)(void *cb_ctx, int rc);
 
 int longhorn_bdev_create(const char *name, const char *address, uint8_t num_base_bdevs);
 int longhorn_bdev_add_base_devices(struct longhorn_bdev_config *longhorn_cfg);
-void longhorn_bdev_remove_base_devices(struct longhorn_bdev_config *longhorn_cfg,
+void longhorn_bdev_remove_base_devices(const char *longhorn_name,
 				   longhorn_bdev_destruct_cb cb_fn, void *cb_ctx);
 int longhorn_bdev_config_add(const char *longhorn_name, uint8_t num_base_bdevs,
 			 struct longhorn_bdev_config **_longhorn_cfg);
@@ -297,5 +297,7 @@ void longhorn_volume_add_pause_cb(struct longhorn_bdev *longhorn_dev,
                                   longhorn_pause_cb cb_fn,
                                   void *cb_arg);
 int longhorn_volume_add_replica(char *name, char *lvs, char *addr, uint16_t nvmf_port, uint16_t comm_port);
+int
+longhorn_bdev_dump_info_json(struct longhorn_bdev *bdev, struct spdk_json_write_ctx *w);
 
 #endif /* SPDK_BDEV_RAID_INTERNAL_H */

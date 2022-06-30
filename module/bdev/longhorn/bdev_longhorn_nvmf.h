@@ -7,6 +7,8 @@
 #define VOLUME_FORMAT "nqn.2021-12.io.longhorn.volume:%s"
 #define REPLICA_FORMAT "nqn.2021-12.io.longhorn.replica:%s/%s"
 #define SNAPSHOT_FORMAT "nqn.2021-12.io.longhorn.snapshot:%s"
+#define REPLICA_SNAPSHOT_FORMAT "nqn.2021-12.io.longhorn.replica.snapshot:%s/%s"
+
 
 void longhorn_nvmf_create_transport(spdk_nvmf_tgt_add_transport_done_fn cb_fn,
                                     void *cb_arg);
@@ -26,6 +28,12 @@ void longhorn_attach_nvmf(const char *bdev_name_prefix, const char *nqn, const c
 
 char *
 longhorn_generate_replica_nqn(const char *lvs, const char *name);
+char *
+longhorn_generate_volume_nqn(const char *name);
+char *
+longhorn_generate_snapshot_nqn(const char *name);
+char *
+longhorn_generate_replica_snapshot_nqn(const char *lvs, const char *name);
 
 #endif /* _BDEV_LONGHORN_NVMF_H_ */
 

@@ -149,11 +149,22 @@ longhorn_submit_read_request(struct longhorn_bdev_io *longhorn_io)
                                       bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
                                       bdev_io->u.bdev.offset_blocks, bdev_io->u.bdev.num_blocks, longhorn_bdev_io_completion,
                                       longhorn_io);
-       
+
+
+      
         if (ret == -ENOMEM) {
                 longhorn_bdev_queue_io_wait(longhorn_io, base_info->bdev, base_ch,
                                         _longhorn_submit_rw_request);
-        } else if (ret != 0) {
+		return;
+        } 
+
+#if 0
+	atomic_fetch_add(&longhorn_bdev->io_ops, 1);
+	atomic_fetch_add(&longhorn_ch->io_ops, 1);
+	longhorn_io->submitted = true;
+#endif
+	
+	if (ret != 0) {
                 SPDK_ERRLOG("bdev io submit error not due to ENOMEM, it should not happen\n");
                 assert(false);
                 longhorn_bdev_io_complete(longhorn_io, SPDK_BDEV_IO_STATUS_FAILED);
@@ -182,9 +193,6 @@ longhorn_submit_write_request(struct longhorn_bdev_io *longhorn_io)
 
 
 	TAILQ_FOREACH(base_channel, &longhorn_ch->base_channels, channels) {
-        //for (pd_idx = 0; pd_idx < longhorn_bdev->num_base_bdevs; pd_idx++) {
-                //base_ch = longhorn_ch->base_channel[pd_idx];
-                //base_info = &longhorn_bdev->base_bdev_info[pd_idx];
                 base_ch = base_channel->base_channel;
 		base_info = base_channel->base_info;
                 
@@ -307,7 +315,14 @@ longhorn_submit_null_payload_request(struct longhorn_bdev_io *longhorn_io)
                 if (ret == -ENOMEM) {
                         longhorn_bdev_queue_io_wait(longhorn_io, base_info->bdev, base_ch,
                                                 _longhorn_submit_null_payload_request);
-                } else if (ret != 0) {
+			return;
+                } 
+
+		atomic_fetch_add(&longhorn_bdev->io_ops, 1);
+		atomic_fetch_add(&longhorn_ch->io_ops, 1);
+		longhorn_io->submitted = true;
+		
+		if (ret != 0) {
                         SPDK_ERRLOG("bdev io submit error not due to ENOMEM, it should not happen\n");
                         assert(false);
                         longhorn_bdev_io_complete(longhorn_io, SPDK_BDEV_IO_STATUS_FAILED);
