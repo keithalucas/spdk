@@ -125,6 +125,24 @@ DEFINE_STUB(spdk_bdev_get_dif_type, enum spdk_dif_type, (const struct spdk_bdev 
 	    SPDK_DIF_DISABLE);
 DEFINE_STUB(spdk_bdev_is_dif_head_of_md, bool, (const struct spdk_bdev *bdev), false);
 DEFINE_STUB(spdk_bdev_notify_blockcnt_change, int, (struct spdk_bdev *bdev, uint64_t size), 0);
+DEFINE_STUB_V(raid_bdev_sb_update_crc, (struct raid_bdev_superblock *sb));
+
+int
+raid_bdev_save_base_bdev_superblock(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+				    const struct raid_bdev_superblock *sb, raid_bdev_save_sb_cb cb, void *cb_ctx)
+{
+	if (cb) {
+		cb(0, cb_ctx);
+	}
+
+	return 0;
+}
+
+const struct spdk_uuid *
+spdk_bdev_get_uuid(const struct spdk_bdev *bdev)
+{
+	return &bdev->uuid;
+}
 
 struct spdk_io_channel *
 spdk_bdev_get_io_channel(struct spdk_bdev_desc *desc)
@@ -436,12 +454,6 @@ struct spdk_bdev *
 spdk_bdev_desc_get_bdev(struct spdk_bdev_desc *desc)
 {
 	return (void *)desc;
-}
-
-char *
-spdk_sprintf_alloc(const char *format, ...)
-{
-	return strdup(format);
 }
 
 int
@@ -919,8 +931,8 @@ verify_raid_bdev(struct rpc_bdev_raid_create *r, bool presence, uint32_t raid_st
 				bdev = spdk_bdev_get_by_name(base_info->bdev->name);
 				CU_ASSERT(bdev != NULL);
 				CU_ASSERT(base_info->remove_scheduled == false);
-				CU_ASSERT((pbdev->superblock_enabled == true && base_info->data_offset != 0) ||
-					  (pbdev->superblock_enabled == false && base_info->data_offset == 0));
+				CU_ASSERT((pbdev->sb != NULL && base_info->data_offset != 0) ||
+					  (pbdev->sb == NULL && base_info->data_offset == 0));
 				CU_ASSERT(base_info->data_offset + base_info->data_size == bdev->blockcnt);
 
 				if (bdev && base_info->data_size < min_blockcnt) {
@@ -989,6 +1001,7 @@ create_base_bdevs(uint32_t bbdev_start_idx)
 		base_bdev = calloc(1, sizeof(struct spdk_bdev));
 		SPDK_CU_ASSERT_FATAL(base_bdev != NULL);
 		base_bdev->name = strdup(name);
+		spdk_uuid_generate(&base_bdev->uuid);
 		SPDK_CU_ASSERT_FATAL(base_bdev->name != NULL);
 		base_bdev->blocklen = g_block_len;
 		base_bdev->blockcnt = BLOCK_CNT;

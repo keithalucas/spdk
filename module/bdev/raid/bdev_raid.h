@@ -9,7 +9,12 @@
 #include "spdk/bdev_module.h"
 #include "spdk/uuid.h"
 
+#include "bdev_raid_sb.h"
+
 #define RAID_BDEV_MIN_DATA_OFFSET_SIZE	(1024*1024) /* 1 MiB */
+
+SPDK_STATIC_ASSERT(RAID_BDEV_SB_MAX_LENGTH < RAID_BDEV_MIN_DATA_OFFSET_SIZE,
+		   "Incorrect min data offset");
 
 enum raid_level {
 	INVALID_RAID_LEVEL	= -1,
@@ -76,6 +81,9 @@ struct raid_base_bdev_info {
 
 	/* Hold the number of blocks to know how large the base bdev is resized. */
 	uint64_t		blockcnt;
+
+	/* io channel for the app thread */
+	struct spdk_io_channel	*app_thread_ch;
 };
 
 /*
@@ -148,9 +156,6 @@ struct raid_bdev {
 	/* Set to true if destroy of this raid bdev is started. */
 	bool				destroy_started;
 
-	/* Set to true if superblock metadata is enabled on this raid bdev */
-	bool				superblock_enabled;
-
 	/* Module for RAID-level specific operations */
 	struct raid_bdev_module		*module;
 
@@ -168,6 +173,12 @@ struct raid_bdev {
 
 	/* Device mutex */
 	pthread_mutex_t			mutex;
+
+	/* Superblock */
+	struct raid_bdev_superblock	*sb;
+
+	/* Superblock write context */
+	void				*sb_write_ctx;
 };
 
 #define RAID_FOR_EACH_BASE_BDEV(r, i) \
