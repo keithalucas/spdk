@@ -96,6 +96,8 @@ struct raid_bdev_io {
 
 	/* Private data for the raid module */
 	void				*module_private;
+
+	TAILQ_ENTRY(raid_bdev_io)	link;
 };
 
 /*
@@ -151,6 +153,18 @@ struct raid_bdev {
 
 	/* Private data for the raid module */
 	void				*module_private;
+
+	/* Counter of callers of raid_bdev_suspend() */
+	uint32_t			suspend_cnt;
+
+	/* Number of channels remaining to suspend */
+	uint32_t			suspend_num_channels;
+
+	/* List of suspend contexts */
+	TAILQ_HEAD(, raid_bdev_suspend_ctx) suspend_ctx;
+
+	/* Device mutex */
+	pthread_mutex_t			mutex;
 };
 
 #define RAID_FOR_EACH_BASE_BDEV(r, i) \
@@ -169,6 +183,15 @@ struct raid_bdev_io_channel {
 
 	/* Private raid module IO channel */
 	struct spdk_io_channel	*module_channel;
+
+	/* Number of raid IOs on this channel */
+	uint32_t		num_ios;
+
+	/* Is the channel currently suspended */
+	bool			is_suspended;
+
+	/* List of suspended IOs */
+	TAILQ_HEAD(, raid_bdev_io) suspended_ios;
 };
 
 /* TAIL head for raid bdev list */
