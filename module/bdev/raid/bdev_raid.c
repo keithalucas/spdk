@@ -51,6 +51,8 @@ static int	raid_bdev_init(void);
 static void	raid_bdev_deconfigure(struct raid_bdev *raid_bdev,
 				      raid_bdev_destruct_cb cb_fn, void *cb_arg);
 
+static void raid_bdev_channel_on_suspended(struct raid_bdev_io_channel *raid_ch);
+
 /*
  * brief:
  * raid_bdev_create_cb function is a cb function for raid bdev which creates the
@@ -76,6 +78,7 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 	assert(raid_bdev->state == RAID_BDEV_STATE_ONLINE);
 
 	raid_ch->num_channels = raid_bdev->num_base_bdevs;
+	TAILQ_INIT(&raid_ch->suspended_ios);
 
 	raid_ch->base_channel = calloc(raid_ch->num_channels,
 				       sizeof(struct spdk_io_channel *));
@@ -83,6 +86,11 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 		SPDK_ERRLOG("Unable to allocate base bdevs io channel\n");
 		return -ENOMEM;
 	}
+
+	pthread_mutex_lock(&raid_bdev->mutex);
+	raid_ch->is_suspended = (raid_bdev->suspend_cnt > 0);
+	pthread_mutex_unlock(&raid_bdev->mutex);
+
 	for (i = 0; i < raid_ch->num_channels; i++) {
 		/*
 		 * Get the spdk_io_channel for all the base bdevs. This is used during
@@ -138,6 +146,7 @@ raid_bdev_destroy_cb(void *io_device, void *ctx_buf)
 
 	assert(raid_ch != NULL);
 	assert(raid_ch->base_channel);
+	assert(TAILQ_EMPTY(&raid_ch->suspended_ios));
 
 	if (raid_ch->module_channel) {
 		spdk_put_io_channel(raid_ch->module_channel);
@@ -184,6 +193,7 @@ raid_bdev_cleanup(struct raid_bdev *raid_bdev)
 static void
 raid_bdev_free(struct raid_bdev *raid_bdev)
 {
+	pthread_mutex_destroy(&raid_bdev->mutex);
 	free(raid_bdev->bdev.name);
 	free(raid_bdev);
 }
@@ -295,8 +305,14 @@ void
 raid_bdev_io_complete(struct raid_bdev_io *raid_io, enum spdk_bdev_io_status status)
 {
 	struct spdk_bdev_io *bdev_io = spdk_bdev_io_from_ctx(raid_io);
+	struct raid_bdev_io_channel *raid_ch = raid_io->raid_ch;
 
 	spdk_bdev_io_complete(bdev_io, status);
+
+	raid_ch->num_ios--;
+	if (raid_ch->is_suspended && raid_ch->num_ios == 0) {
+		raid_bdev_channel_on_suspended(raid_ch);
+	}
 }
 
 /*
@@ -464,9 +480,17 @@ static void
 raid_bdev_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	struct raid_bdev_io *raid_io = (struct raid_bdev_io *)bdev_io->driver_ctx;
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+
+	if (raid_ch->is_suspended) {
+		TAILQ_INSERT_TAIL(&raid_ch->suspended_ios, raid_io, link);
+		return;
+	} else {
+		raid_ch->num_ios++;
+	}
 
 	raid_io->raid_bdev = bdev_io->bdev->ctxt;
-	raid_io->raid_ch = spdk_io_channel_get_ctx(ch);
+	raid_io->raid_ch = raid_ch;
 	raid_io->base_bdev_io_remaining = 0;
 	raid_io->base_bdev_io_submitted = 0;
 	raid_io->base_bdev_io_status = SPDK_BDEV_IO_STATUS_SUCCESS;
@@ -923,6 +947,7 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	struct spdk_bdev *raid_bdev_gen;
 	struct raid_bdev_module *module;
 	uint8_t min_operational;
+	int rc;
 
 	if (raid_bdev_find_by_name(name) != NULL) {
 		SPDK_ERRLOG("Duplicate raid bdev name found: %s\n", name);
@@ -1006,12 +1031,21 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	raid_bdev->level = level;
 	raid_bdev->min_base_bdevs_operational = min_operational;
 	raid_bdev->superblock_enabled = superblock;
+	TAILQ_INIT(&raid_bdev->suspend_ctx);
+	rc = pthread_mutex_init(&raid_bdev->mutex, NULL);
+	if (rc) {
+		SPDK_ERRLOG("Cannot init mutex for raid bdev\n");
+		free(raid_bdev->base_bdev_info);
+		free(raid_bdev);
+		return rc;
+	}
 
 	raid_bdev_gen = &raid_bdev->bdev;
 
 	raid_bdev_gen->name = strdup(name);
 	if (!raid_bdev_gen->name) {
 		SPDK_ERRLOG("Unable to allocate name for raid\n");
+		pthread_mutex_destroy(&raid_bdev->mutex);
 		free(raid_bdev->base_bdev_info);
 		free(raid_bdev);
 		return -ENOMEM;
@@ -1219,6 +1253,157 @@ raid_bdev_find_by_base_bdev(struct spdk_bdev *base_bdev, struct raid_bdev **_rai
 	}
 
 	return false;
+}
+
+typedef void (*raid_bdev_suspended_cb)(struct raid_bdev *raid_bdev, void *ctx);
+
+struct raid_bdev_suspend_ctx {
+	raid_bdev_suspended_cb suspended_cb;
+	void *suspended_cb_ctx;
+	TAILQ_ENTRY(raid_bdev_suspend_ctx) link;
+};
+
+static void
+raid_bdev_on_suspended(struct raid_bdev *raid_bdev)
+{
+	struct raid_bdev_suspend_ctx *ctx;
+
+	while ((ctx = TAILQ_FIRST(&raid_bdev->suspend_ctx))) {
+		TAILQ_REMOVE(&raid_bdev->suspend_ctx, ctx, link);
+		ctx->suspended_cb(raid_bdev, ctx->suspended_cb_ctx);
+		free(ctx);
+	}
+}
+
+static void
+raid_bdev_inc_suspend_num_channels(void *_raid_bdev)
+{
+	struct raid_bdev *raid_bdev = _raid_bdev;
+
+	raid_bdev->suspend_num_channels++;
+}
+
+static void
+raid_bdev_dec_suspend_num_channels(void *_raid_bdev)
+{
+	struct raid_bdev *raid_bdev = _raid_bdev;
+
+	if (--raid_bdev->suspend_num_channels == 0) {
+		raid_bdev_on_suspended(raid_bdev);
+	}
+}
+
+static void
+raid_bdev_channel_on_suspended(struct raid_bdev_io_channel *raid_ch)
+{
+	struct spdk_io_channel *ch = spdk_io_channel_from_ctx(raid_ch);
+	struct raid_bdev *raid_bdev = spdk_io_channel_get_io_device(ch);
+
+	spdk_thread_exec_msg(spdk_thread_get_app_thread(), raid_bdev_dec_suspend_num_channels, raid_bdev);
+}
+
+static void
+raid_bdev_channel_suspend(struct spdk_io_channel_iter *i)
+{
+	struct raid_bdev *raid_bdev = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+
+	SPDK_DEBUGLOG(bdev_raid, "raid_ch: %p\n", raid_ch);
+
+	spdk_thread_exec_msg(spdk_thread_get_app_thread(), raid_bdev_inc_suspend_num_channels, raid_bdev);
+
+	raid_ch->is_suspended = true;
+	if (raid_ch->num_ios == 0) {
+		raid_bdev_channel_on_suspended(raid_ch);
+	}
+
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+raid_bdev_suspend_continue(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev *raid_bdev = spdk_io_channel_iter_get_ctx(i);
+
+	raid_bdev_dec_suspend_num_channels(raid_bdev);
+}
+
+static int raid_bdev_suspend(struct raid_bdev *raid_bdev, raid_bdev_suspended_cb cb,
+			     void *cb_ctx) __attribute__((unused));
+
+static int
+raid_bdev_suspend(struct raid_bdev *raid_bdev, raid_bdev_suspended_cb cb, void *cb_ctx)
+{
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	pthread_mutex_lock(&raid_bdev->mutex);
+	raid_bdev->suspend_cnt++;
+	pthread_mutex_unlock(&raid_bdev->mutex);
+
+	if (raid_bdev->suspend_cnt > 1 && raid_bdev->suspend_num_channels == 0) {
+		if (cb != NULL) {
+			cb(raid_bdev, cb_ctx);
+		}
+		return 0;
+	}
+
+	if (cb != NULL) {
+		struct raid_bdev_suspend_ctx *ctx;
+
+		ctx = malloc(sizeof(*ctx));
+		if (ctx == NULL) {
+			return -ENOMEM;
+		}
+		ctx->suspended_cb = cb;
+		ctx->suspended_cb_ctx = cb_ctx;
+		TAILQ_INSERT_TAIL(&raid_bdev->suspend_ctx, ctx, link);
+	}
+
+	/* decremented in raid_bdev_suspend_continue() - in case there are no IO channels */
+	raid_bdev_inc_suspend_num_channels(raid_bdev);
+
+	spdk_for_each_channel(raid_bdev, raid_bdev_channel_suspend, raid_bdev,
+			      raid_bdev_suspend_continue);
+
+	return 0;
+}
+
+static void
+raid_bdev_channel_resume(struct spdk_io_channel_iter *i)
+{
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+	struct raid_bdev_io *raid_io;
+
+	SPDK_DEBUGLOG(bdev_raid, "raid_ch: %p\n", raid_ch);
+
+	raid_ch->is_suspended = false;
+
+	while ((raid_io = TAILQ_FIRST(&raid_ch->suspended_ios))) {
+		TAILQ_REMOVE(&raid_ch->suspended_ios, raid_io, link);
+		raid_bdev_submit_request(spdk_io_channel_from_ctx(raid_ch),
+					 spdk_bdev_io_from_ctx(raid_io));
+	}
+
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void raid_bdev_resume(struct raid_bdev *raid_bdev) __attribute__((unused));
+
+static void
+raid_bdev_resume(struct raid_bdev *raid_bdev)
+{
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+	assert(raid_bdev->suspend_cnt > 0);
+
+	pthread_mutex_lock(&raid_bdev->mutex);
+	raid_bdev->suspend_cnt--;
+	pthread_mutex_unlock(&raid_bdev->mutex);
+
+	if (raid_bdev->suspend_cnt == 0) {
+		spdk_for_each_channel(raid_bdev, raid_bdev_channel_resume, raid_bdev, NULL);
+	}
 }
 
 /*
