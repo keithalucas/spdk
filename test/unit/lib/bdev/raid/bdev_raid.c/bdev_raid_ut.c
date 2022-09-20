@@ -73,6 +73,9 @@ struct raid_io_ranges g_io_ranges[MAX_TEST_IO_RANGE];
 uint32_t g_io_range_idx;
 uint64_t g_lba_offset;
 struct spdk_io_channel g_io_channel;
+bool g_bdev_io_defer_completion;
+TAILQ_HEAD(, spdk_bdev_io) g_deferred_ios = TAILQ_HEAD_INITIALIZER(g_deferred_ios);
+struct spdk_io_channel *g_per_thread_base_bdev_channels;
 
 DEFINE_STUB_V(spdk_bdev_module_examine_done, (struct spdk_bdev_module *module));
 DEFINE_STUB_V(spdk_bdev_module_list_add, (struct spdk_bdev_module *bdev_module));
@@ -126,9 +129,17 @@ DEFINE_STUB(spdk_bdev_notify_blockcnt_change, int, (struct spdk_bdev *bdev, uint
 struct spdk_io_channel *
 spdk_bdev_get_io_channel(struct spdk_bdev_desc *desc)
 {
-	g_io_channel.thread = spdk_get_thread();
+	struct spdk_io_channel *ch;
 
-	return &g_io_channel;
+	if (g_per_thread_base_bdev_channels) {
+		ch = &g_per_thread_base_bdev_channels[g_ut_thread_id];
+	} else {
+		ch = &g_io_channel;
+	}
+
+	ch->thread = spdk_get_thread();
+
+	return ch;
 }
 
 static void
@@ -181,6 +192,8 @@ set_globals(void)
 	g_json_decode_obj_err = 0;
 	g_json_decode_obj_create = 0;
 	g_lba_offset = 0;
+	g_bdev_io_defer_completion = false;
+	g_per_thread_base_bdev_channels = NULL;
 }
 
 static void
@@ -196,6 +209,8 @@ base_bdevs_cleanup(void)
 			free(bdev);
 		}
 	}
+
+	free(g_per_thread_base_bdev_channels);
 }
 
 static void
@@ -225,6 +240,7 @@ reset_globals(void)
 	}
 	g_rpc_req = NULL;
 	g_rpc_req_size = 0;
+	g_per_thread_base_bdev_channels = NULL;
 }
 
 void
@@ -257,6 +273,29 @@ set_io_output(struct io_output *output,
 	output->iotype = iotype;
 }
 
+static void
+child_io_complete(struct spdk_bdev_io *child_io, spdk_bdev_io_completion_cb cb, void *cb_arg)
+{
+	if (g_bdev_io_defer_completion) {
+		child_io->internal.cb = cb;
+		child_io->internal.caller_ctx = cb_arg;
+		TAILQ_INSERT_TAIL(&g_deferred_ios, child_io, internal.link);
+	} else {
+		cb(child_io, g_child_io_status_flag, cb_arg);
+	}
+}
+
+static void
+complete_deferred_ios(void)
+{
+	struct spdk_bdev_io *child_io;
+
+	while ((child_io = TAILQ_FIRST(&g_deferred_ios))) {
+		TAILQ_REMOVE(&g_deferred_ios, child_io, internal.link);
+		child_io->internal.cb(child_io, g_child_io_status_flag, child_io->internal.caller_ctx);
+	}
+}
+
 /* It will cache the split IOs for verification */
 int
 spdk_bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
@@ -283,7 +322,7 @@ spdk_bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 
 		child_io = calloc(1, sizeof(struct spdk_bdev_io));
 		SPDK_CU_ASSERT_FATAL(child_io != NULL);
-		cb(child_io, g_child_io_status_flag, cb_arg);
+		child_io_complete(child_io, cb, cb_arg);
 	}
 
 	return g_bdev_io_submit_status;
@@ -325,7 +364,7 @@ spdk_bdev_reset(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 
 		child_io = calloc(1, sizeof(struct spdk_bdev_io));
 		SPDK_CU_ASSERT_FATAL(child_io != NULL);
-		cb(child_io, g_child_io_status_flag, cb_arg);
+		child_io_complete(child_io, cb, cb_arg);
 	}
 
 	return g_bdev_io_submit_status;
@@ -350,7 +389,7 @@ spdk_bdev_unmap_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 
 		child_io = calloc(1, sizeof(struct spdk_bdev_io));
 		SPDK_CU_ASSERT_FATAL(child_io != NULL);
-		cb(child_io, g_child_io_status_flag, cb_arg);
+		child_io_complete(child_io, cb, cb_arg);
 	}
 
 	return g_bdev_io_submit_status;
@@ -487,7 +526,7 @@ spdk_bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 
 		child_io = calloc(1, sizeof(struct spdk_bdev_io));
 		SPDK_CU_ASSERT_FATAL(child_io != NULL);
-		cb(child_io, g_child_io_status_flag, cb_arg);
+		child_io_complete(child_io, cb, cb_arg);
 	}
 
 	return g_bdev_io_submit_status;
@@ -1991,6 +2030,246 @@ test_create_raid_superblock(void)
 
 }
 
+static void
+suspend_cb(struct raid_bdev *raid_bdev, void *ctx)
+{
+	*(bool *)ctx = true;
+}
+
+static void
+test_raid_suspend_resume(void)
+{
+	struct rpc_bdev_raid_create req;
+	struct rpc_bdev_raid_delete destroy_req;
+	struct raid_bdev *pbdev;
+	struct spdk_io_channel *ch;
+	struct raid_bdev_io_channel *raid_ch;
+	struct spdk_bdev_io *bdev_io;
+	bool suspend_cb_called, suspend_cb_called2;
+	int rc;
+
+	set_globals();
+	CU_ASSERT(raid_bdev_init() == 0);
+
+	verify_raid_bdev_present("raid1", false);
+	create_raid_bdev_create_req(&req, "raid1", 0, true, 0, false);
+	rpc_bdev_raid_create(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev(&req, true, RAID_BDEV_STATE_ONLINE);
+
+	TAILQ_FOREACH(pbdev, &g_raid_bdev_list, global_link) {
+		if (strcmp(pbdev->bdev.name, "raid1") == 0) {
+			break;
+		}
+	}
+	CU_ASSERT(pbdev != NULL);
+
+	/* suspend/resume with no io channels */
+	suspend_cb_called = false;
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	poll_threads();
+	CU_ASSERT(suspend_cb_called == true);
+	raid_bdev_resume(pbdev);
+	poll_threads();
+
+	/* suspend/resume with one idle io channel */
+	ch = spdk_get_io_channel(pbdev);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+	raid_ch = spdk_io_channel_get_ctx(ch);
+
+	suspend_cb_called = false;
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	poll_threads();
+	CU_ASSERT(suspend_cb_called == true);
+	CU_ASSERT(raid_ch->is_suspended == true);
+	raid_bdev_resume(pbdev);
+	poll_threads();
+	CU_ASSERT(raid_ch->is_suspended == false);
+
+	/* suspend/resume multiple */
+	suspend_cb_called = false;
+	suspend_cb_called2 = false;
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called2);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	poll_threads();
+	CU_ASSERT(suspend_cb_called == true);
+	CU_ASSERT(suspend_cb_called2 == true);
+	CU_ASSERT(raid_ch->is_suspended == true);
+	suspend_cb_called = false;
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	CU_ASSERT(suspend_cb_called == true);
+
+	raid_bdev_resume(pbdev);
+	poll_threads();
+	CU_ASSERT(raid_ch->is_suspended == true);
+	raid_bdev_resume(pbdev);
+	poll_threads();
+	CU_ASSERT(raid_ch->is_suspended == true);
+	raid_bdev_resume(pbdev);
+	poll_threads();
+	CU_ASSERT(raid_ch->is_suspended == false);
+
+	/* suspend/resume with io before and after suspend */
+	bdev_io = calloc(1, sizeof(struct spdk_bdev_io) + sizeof(struct raid_bdev_io));
+	SPDK_CU_ASSERT_FATAL(bdev_io != NULL);
+	bdev_io_initialize(bdev_io, ch, &pbdev->bdev, 0, 1, SPDK_BDEV_IO_TYPE_READ);
+	memset(g_io_output, 0, ((g_max_io_size / g_strip_size) + 1) * sizeof(struct io_output));
+	g_io_output_index = 0;
+	g_bdev_io_defer_completion = true;
+	raid_bdev_submit_request(ch, bdev_io);
+	CU_ASSERT(raid_ch->num_ios == 1);
+
+	suspend_cb_called = false;
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	poll_threads();
+	CU_ASSERT(raid_ch->is_suspended == true);
+	CU_ASSERT(suspend_cb_called == false);
+	complete_deferred_ios();
+	verify_io(bdev_io, req.base_bdevs.num_base_bdevs, raid_ch, pbdev, g_child_io_status_flag);
+	poll_threads();
+	CU_ASSERT(suspend_cb_called == true);
+	g_io_output_index = 0;
+	raid_bdev_submit_request(ch, bdev_io);
+	CU_ASSERT(raid_ch->num_ios == 0);
+	CU_ASSERT(TAILQ_FIRST(&raid_ch->suspended_ios) == (struct raid_bdev_io *)bdev_io->driver_ctx);
+
+	raid_bdev_resume(pbdev);
+	poll_threads();
+	CU_ASSERT(raid_ch->is_suspended == false);
+	verify_io(bdev_io, req.base_bdevs.num_base_bdevs, raid_ch, pbdev, g_child_io_status_flag);
+
+	bdev_io_cleanup(bdev_io);
+	spdk_put_io_channel(ch);
+
+	free_test_req(&req);
+
+	create_raid_bdev_delete_req(&destroy_req, "raid1", 0);
+	rpc_bdev_raid_delete(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev_present("raid1", false);
+
+	raid_bdev_exit();
+	base_bdevs_cleanup();
+	reset_globals();
+}
+
+static void
+test_raid_suspend_resume_create_ch(void)
+{
+	struct rpc_bdev_raid_create req;
+	struct rpc_bdev_raid_delete destroy_req;
+	struct raid_bdev *pbdev;
+	struct spdk_io_channel *ch1, *ch2;
+	struct raid_bdev_io_channel *raid_ch1, *raid_ch2;
+	bool suspend_cb_called;
+	int rc;
+
+	free_threads();
+	allocate_threads(3);
+	set_thread(0);
+
+	set_globals();
+	CU_ASSERT(raid_bdev_init() == 0);
+
+	g_per_thread_base_bdev_channels = calloc(3, sizeof(struct spdk_io_channel));
+
+	verify_raid_bdev_present("raid1", false);
+	create_raid_bdev_create_req(&req, "raid1", 0, true, 0, false);
+	rpc_bdev_raid_create(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev(&req, true, RAID_BDEV_STATE_ONLINE);
+
+	TAILQ_FOREACH(pbdev, &g_raid_bdev_list, global_link) {
+		if (strcmp(pbdev->bdev.name, "raid1") == 0) {
+			break;
+		}
+	}
+	CU_ASSERT(pbdev != NULL);
+
+	set_thread(1);
+	ch1 = spdk_get_io_channel(pbdev);
+	SPDK_CU_ASSERT_FATAL(ch1 != NULL);
+	raid_ch1 = spdk_io_channel_get_ctx(ch1);
+
+	/* create a new io channel during suspend */
+	set_thread(0);
+	suspend_cb_called = false;
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+
+	poll_thread(1);
+	CU_ASSERT(raid_ch1->is_suspended == true);
+	CU_ASSERT(suspend_cb_called == false);
+
+	set_thread(2);
+	ch2 = spdk_get_io_channel(pbdev);
+	SPDK_CU_ASSERT_FATAL(ch2 != NULL);
+	raid_ch2 = spdk_io_channel_get_ctx(ch2);
+
+	poll_threads();
+	CU_ASSERT(suspend_cb_called == true);
+	CU_ASSERT(raid_ch1->is_suspended == true);
+	CU_ASSERT(raid_ch2->is_suspended == true);
+	set_thread(0);
+	raid_bdev_resume(pbdev);
+	poll_threads();
+	CU_ASSERT(raid_ch1->is_suspended == false);
+	CU_ASSERT(raid_ch2->is_suspended == false);
+	set_thread(2);
+	spdk_put_io_channel(ch2);
+	poll_threads();
+
+	/* create a new io channel during resume */
+	set_thread(0);
+	suspend_cb_called = false;
+	rc = raid_bdev_suspend(pbdev, suspend_cb, &suspend_cb_called);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	poll_threads();
+	CU_ASSERT(suspend_cb_called == true);
+	CU_ASSERT(raid_ch1->is_suspended == true);
+	raid_bdev_resume(pbdev);
+
+	set_thread(2);
+	ch2 = spdk_get_io_channel(pbdev);
+	SPDK_CU_ASSERT_FATAL(ch2 != NULL);
+	raid_ch2 = spdk_io_channel_get_ctx(ch2);
+	CU_ASSERT(raid_ch1->is_suspended == true);
+	CU_ASSERT(raid_ch2->is_suspended == false);
+
+	poll_threads();
+	CU_ASSERT(raid_ch1->is_suspended == false);
+	CU_ASSERT(raid_ch2->is_suspended == false);
+	set_thread(2);
+	spdk_put_io_channel(ch2);
+	poll_threads();
+
+	set_thread(1);
+	spdk_put_io_channel(ch1);
+	poll_threads();
+	set_thread(0);
+
+	free_test_req(&req);
+
+	create_raid_bdev_delete_req(&destroy_req, "raid1", 0);
+	rpc_bdev_raid_delete(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev_present("raid1", false);
+
+	raid_bdev_exit();
+	base_bdevs_cleanup();
+	reset_globals();
+
+	free_threads();
+	allocate_threads(1);
+	set_thread(0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2019,6 +2298,8 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_raid_json_dump_info);
 	CU_ADD_TEST(suite, test_context_size);
 	CU_ADD_TEST(suite, test_raid_level_conversions);
+	CU_ADD_TEST(suite, test_raid_suspend_resume);
+	CU_ADD_TEST(suite, test_raid_suspend_resume_create_ch);
 
 	allocate_threads(1);
 	set_thread(0);
