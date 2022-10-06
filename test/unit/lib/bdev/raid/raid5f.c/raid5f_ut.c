@@ -14,6 +14,7 @@
 #include "../common.c"
 
 static void *g_accel_p = (void *)0xdeadbeaf;
+static bool g_test_degraded;
 
 DEFINE_STUB_V(raid_bdev_module_list_add, (struct raid_bdev_module *raid_module));
 DEFINE_STUB(spdk_bdev_get_buf_align, size_t, (const struct spdk_bdev *bdev), 0);
@@ -114,7 +115,7 @@ fini_accel(void)
 }
 
 static int
-test_setup(void)
+test_suite_init(void)
 {
 	uint8_t num_base_bdevs_values[] = { 3, 4, 5 };
 	uint64_t base_bdev_blockcnt_values[] = { 1, 1024, 1024 * 1024 };
@@ -167,11 +168,17 @@ test_setup(void)
 }
 
 static int
-test_cleanup(void)
+test_suite_cleanup(void)
 {
 	fini_accel();
 	raid_test_params_free();
 	return 0;
+}
+
+static void
+test_setup(void)
+{
+	g_test_degraded = false;
 }
 
 static struct raid5f_info *
@@ -230,7 +237,9 @@ struct raid_io_info {
 	struct raid5f_info *r5f_info;
 	struct raid_bdev_io_channel *raid_ch;
 	enum spdk_bdev_io_type io_type;
+	uint64_t stripe_index;
 	uint64_t offset_blocks;
+	uint64_t stripe_offset_blocks;
 	uint64_t num_blocks;
 	void *src_buf;
 	void *dest_buf;
@@ -243,6 +252,8 @@ struct raid_io_info {
 	void *parity_md_buf;
 	void *reference_md_parity;
 	size_t parity_md_buf_size;
+	void *degraded_buf;
+	void *degraded_md_buf;
 	enum spdk_bdev_io_status status;
 	TAILQ_HEAD(, spdk_bdev_io) bdev_io_queue;
 	TAILQ_HEAD(, spdk_bdev_io_wait_entry) bdev_io_wait_queue;
@@ -387,6 +398,8 @@ process_io_completions(struct raid_io_info *io_info)
 		bdev_io->internal.cb(bdev_io, success, bdev_io->internal.caller_ctx);
 	}
 
+	poll_threads();
+
 	if (io_info->error.type == TEST_BDEV_ERROR_NOMEM) {
 		struct spdk_bdev_io_wait_entry *waitq_entry, *tmp;
 		struct spdk_bdev *enomem_bdev = io_info->error.bdev;
@@ -426,7 +439,7 @@ spdk_bdev_writev_blocks_with_md(struct spdk_bdev_desc *desc, struct spdk_io_chan
 	uint64_t data_offset;
 	void *dest_buf, *dest_md_buf;
 
-	SPDK_CU_ASSERT_FATAL(cb == raid5f_chunk_write_complete_bdev_io);
+	SPDK_CU_ASSERT_FATAL(cb == raid5f_chunk_complete_bdev_io);
 	SPDK_CU_ASSERT_FATAL(iovcnt == 1);
 
 	stripe_req = raid5f_chunk_stripe_req(chunk);
@@ -458,6 +471,44 @@ spdk_bdev_writev_blocks_with_md(struct spdk_bdev_desc *desc, struct spdk_io_chan
 	}
 
 submit:
+	return submit_io(io_info, desc, cb, cb_arg);
+}
+
+static int
+spdk_bdev_readv_blocks_degraded(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+				struct iovec *iov, int iovcnt,
+				uint64_t offset_blocks, uint64_t num_blocks,
+				spdk_bdev_io_completion_cb cb, void *cb_arg)
+{
+	struct chunk *chunk = cb_arg;
+	struct stripe_request *stripe_req;
+	struct test_raid_bdev_io *test_raid_bdev_io;
+	struct raid_io_info *io_info;
+	struct raid_bdev *raid_bdev;
+	uint8_t data_chunk_idx;
+	void *buf;
+
+	SPDK_CU_ASSERT_FATAL(cb == raid5f_chunk_complete_bdev_io);
+	SPDK_CU_ASSERT_FATAL(iovcnt == 1);
+
+	stripe_req = raid5f_chunk_stripe_req(chunk);
+	test_raid_bdev_io = (struct test_raid_bdev_io *)spdk_bdev_io_from_ctx(stripe_req->raid_io);
+	io_info = test_raid_bdev_io->io_info;
+	raid_bdev = io_info->r5f_info->raid_bdev;
+
+	if (chunk == stripe_req->parity_chunk) {
+		buf = io_info->reference_parity;
+	} else {
+		data_chunk_idx = chunk < stripe_req->parity_chunk ? chunk->index : chunk->index - 1;
+		buf = io_info->degraded_buf +
+		      data_chunk_idx * raid_bdev->strip_size * raid_bdev->bdev.blocklen;
+	}
+
+	buf += (offset_blocks % raid_bdev->strip_size) * raid_bdev->bdev.blocklen;
+
+	SPDK_CU_ASSERT_FATAL(num_blocks * raid_bdev->bdev.blocklen <= iov->iov_len);
+	memcpy(iov->iov_base, buf, num_blocks * raid_bdev->bdev.blocklen);
+
 	return submit_io(io_info, desc, cb, cb_arg);
 }
 
@@ -493,10 +544,15 @@ spdk_bdev_readv_blocks_with_md(struct spdk_bdev_desc *desc, struct spdk_io_chann
 	struct raid_bdev_io *raid_io = cb_arg;
 	struct test_raid_bdev_io *test_raid_bdev_io;
 
-	SPDK_CU_ASSERT_FATAL(cb == raid5f_chunk_read_complete);
-	SPDK_CU_ASSERT_FATAL(iovcnt == 1);
+	if (cb == raid5f_chunk_complete_bdev_io) {
+		return spdk_bdev_readv_blocks_degraded(desc, ch, iov, iovcnt, offset_blocks, num_blocks, cb,
+						       cb_arg);
+	}
 
 	test_raid_bdev_io = (struct test_raid_bdev_io *)spdk_bdev_io_from_ctx(raid_io);
+
+	SPDK_CU_ASSERT_FATAL(cb == raid5f_chunk_read_complete);
+	SPDK_CU_ASSERT_FATAL(iovcnt == 1);
 
 	memcpy(iov->iov_base, test_raid_bdev_io->buf, iov->iov_len);
 	if (md_buf != NULL) {
@@ -553,6 +609,37 @@ test_raid5f_write_request(struct raid_io_info *io_info)
 
 	process_io_completions(io_info);
 
+	if (g_test_degraded) {
+		struct raid_bdev *raid_bdev = io_info->r5f_info->raid_bdev;
+		uint8_t p_idx;
+		uint8_t i;
+		off_t offset;
+		uint32_t strip_len;
+
+		for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
+			if (io_info->raid_ch->base_channel[i] == NULL) {
+				break;
+			}
+		}
+
+		SPDK_CU_ASSERT_FATAL(i != raid_bdev->num_base_bdevs);
+
+		p_idx = raid5f_stripe_parity_chunk_index(raid_bdev, io_info->stripe_index);
+
+		if (i == p_idx) {
+			return;
+		}
+
+		if (i >= p_idx) {
+			i--;
+		}
+
+		strip_len = raid_bdev->strip_size_kb * 1024;
+		offset = i * strip_len;
+
+		memcpy(io_info->dest_buf + offset, io_info->src_buf + offset, strip_len);
+	}
+
 	if (io_info->status == SPDK_BDEV_IO_STATUS_SUCCESS) {
 		if (io_info->parity_buf) {
 			CU_ASSERT(memcmp(io_info->parity_buf, io_info->reference_parity,
@@ -590,12 +677,14 @@ deinit_io_info(struct raid_io_info *io_info)
 	free(io_info->reference_parity);
 	free(io_info->parity_md_buf);
 	free(io_info->reference_md_parity);
+	free(io_info->degraded_buf);
+	free(io_info->degraded_md_buf);
 }
 
 static void
 init_io_info(struct raid_io_info *io_info, struct raid5f_info *r5f_info,
 	     struct raid_bdev_io_channel *raid_ch, enum spdk_bdev_io_type io_type,
-	     uint64_t offset_blocks, uint64_t num_blocks)
+	     uint64_t stripe_index, uint64_t stripe_offset_blocks, uint64_t num_blocks)
 {
 	struct raid_bdev *raid_bdev = r5f_info->raid_bdev;
 	uint32_t blocklen = raid_bdev->bdev.blocklen;
@@ -605,6 +694,8 @@ init_io_info(struct raid_io_info *io_info, struct raid5f_info *r5f_info,
 	size_t buf_md_size = num_blocks * raid_bdev->bdev.md_len;
 	uint64_t block;
 	uint64_t i;
+
+	SPDK_CU_ASSERT_FATAL(stripe_offset_blocks < r5f_info->stripe_blocks);
 
 	memset(io_info, 0, sizeof(*io_info));
 
@@ -643,7 +734,9 @@ init_io_info(struct raid_io_info *io_info, struct raid5f_info *r5f_info,
 	io_info->r5f_info = r5f_info;
 	io_info->raid_ch = raid_ch;
 	io_info->io_type = io_type;
-	io_info->offset_blocks = offset_blocks;
+	io_info->stripe_index = stripe_index;
+	io_info->offset_blocks = stripe_index * r5f_info->stripe_blocks + stripe_offset_blocks;
+	io_info->stripe_offset_blocks = stripe_offset_blocks;
 	io_info->num_blocks = num_blocks;
 	io_info->src_buf = src_buf;
 	io_info->dest_buf = dest_buf;
@@ -657,14 +750,12 @@ init_io_info(struct raid_io_info *io_info, struct raid5f_info *r5f_info,
 }
 
 static void
-io_info_setup_parity(struct raid_io_info *io_info)
+io_info_setup_parity(struct raid_io_info *io_info, void *src, void *src_md)
 {
 	struct raid5f_info *r5f_info = io_info->r5f_info;
 	struct raid_bdev *raid_bdev = r5f_info->raid_bdev;
 	uint32_t blocklen = raid_bdev->bdev.blocklen;
 	size_t strip_len = raid_bdev->strip_size * blocklen;
-	size_t strip_md_len = raid_bdev->strip_size * raid_bdev->bdev.md_len;
-	void *src = io_info->src_buf;
 	unsigned i;
 
 	io_info->parity_buf_size = strip_len;
@@ -679,17 +770,59 @@ io_info_setup_parity(struct raid_io_info *io_info)
 		src += strip_len;
 	}
 
-	io_info->parity_md_buf_size = strip_md_len;
-	io_info->parity_md_buf = calloc(1, io_info->parity_md_buf_size);
-	SPDK_CU_ASSERT_FATAL(io_info->parity_md_buf != NULL);
+	if (src_md) {
+		size_t strip_md_len = raid_bdev->strip_size * raid_bdev->bdev.md_len;
 
-	io_info->reference_md_parity = calloc(1, io_info->parity_md_buf_size);
-	SPDK_CU_ASSERT_FATAL(io_info->reference_md_parity != NULL);
+		io_info->parity_md_buf_size = strip_md_len;
+		io_info->parity_md_buf = calloc(1, io_info->parity_md_buf_size);
+		SPDK_CU_ASSERT_FATAL(io_info->parity_md_buf != NULL);
 
-	src = io_info->src_md_buf;
-	for (i = 0; i < raid5f_stripe_data_chunks_num(raid_bdev); i++) {
-		xor_block(io_info->reference_md_parity, src, strip_md_len);
-		src += strip_md_len;
+		io_info->reference_md_parity = calloc(1, io_info->parity_md_buf_size);
+		SPDK_CU_ASSERT_FATAL(io_info->reference_md_parity != NULL);
+
+		for (i = 0; i < raid5f_stripe_data_chunks_num(raid_bdev); i++) {
+			xor_block(io_info->reference_md_parity, src_md, strip_md_len);
+			src_md += strip_md_len;
+		}
+	}
+}
+
+static void
+io_info_setup_degraded(struct raid_io_info *io_info)
+{
+	struct raid5f_info *r5f_info = io_info->r5f_info;
+	struct raid_bdev *raid_bdev = r5f_info->raid_bdev;
+	uint32_t blocklen = raid_bdev->bdev.blocklen;
+	uint32_t md_len = raid_bdev->bdev.md_len;
+	size_t stripe_len = r5f_info->stripe_blocks * blocklen;
+	size_t stripe_md_len = r5f_info->stripe_blocks * md_len;
+
+	io_info->degraded_buf = malloc(stripe_len);
+	SPDK_CU_ASSERT_FATAL(io_info->degraded_buf != NULL);
+
+	memset(io_info->degraded_buf, 0xab, stripe_len);
+
+	memcpy(io_info->degraded_buf + io_info->stripe_offset_blocks * blocklen,
+	       io_info->src_buf, io_info->num_blocks * blocklen);
+
+	if (stripe_md_len != 0) {
+		io_info->degraded_md_buf = malloc(stripe_md_len);
+		SPDK_CU_ASSERT_FATAL(io_info->degraded_md_buf != NULL);
+
+		memset(io_info->degraded_md_buf, 0xab, stripe_md_len);
+
+		memcpy(io_info->degraded_md_buf + io_info->stripe_offset_blocks * md_len,
+		       io_info->src_md_buf, io_info->num_blocks * md_len);
+	}
+
+	io_info_setup_parity(io_info, io_info->degraded_buf, io_info->degraded_md_buf);
+
+	memset(io_info->degraded_buf + io_info->stripe_offset_blocks * blocklen,
+	       0xcd, io_info->num_blocks * blocklen);
+
+	if (stripe_md_len != 0) {
+		memset(io_info->degraded_md_buf + io_info->stripe_offset_blocks * md_len,
+		       0xcd, io_info->num_blocks * md_len);
 	}
 }
 
@@ -698,19 +831,19 @@ test_raid5f_submit_rw_request(struct raid5f_info *r5f_info, struct raid_bdev_io_
 			      enum spdk_bdev_io_type io_type, uint64_t stripe_index, uint64_t stripe_offset_blocks,
 			      uint64_t num_blocks)
 {
-	uint64_t offset_blocks = stripe_index * r5f_info->stripe_blocks + stripe_offset_blocks;
 	struct raid_io_info io_info;
 
-	SPDK_CU_ASSERT_FATAL(stripe_offset_blocks < r5f_info->stripe_blocks);
-
-	init_io_info(&io_info, r5f_info, raid_ch, io_type, offset_blocks, num_blocks);
+	init_io_info(&io_info, r5f_info, raid_ch, io_type, stripe_index, stripe_offset_blocks, num_blocks);
 
 	switch (io_type) {
 	case SPDK_BDEV_IO_TYPE_READ:
+		if (g_test_degraded) {
+			io_info_setup_degraded(&io_info);
+		}
 		test_raid5f_read_request(&io_info);
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
-		io_info_setup_parity(&io_info);
+		io_info_setup_parity(&io_info, io_info.src_buf, io_info.src_md_buf);
 		test_raid5f_write_request(&io_info);
 		break;
 	default:
@@ -735,12 +868,20 @@ run_for_each_raid5f_config(void (*test_fn)(struct raid_bdev *raid_bdev,
 	RAID_PARAMS_FOR_EACH(params) {
 		struct raid5f_info *r5f_info;
 		struct raid_bdev_io_channel raid_ch = { 0 };
+		int i;
 
 		r5f_info = create_raid5f(params);
 
 		raid_ch.num_channels = params->num_base_bdevs;
 		raid_ch.base_channel = calloc(params->num_base_bdevs, sizeof(struct spdk_io_channel *));
 		SPDK_CU_ASSERT_FATAL(raid_ch.base_channel != NULL);
+
+		for (i = 0; i < params->num_base_bdevs; i++) {
+			if (g_test_degraded && i == 0) {
+				continue;
+			}
+			raid_ch.base_channel[i] = (void *)1;
+		}
 
 		raid_ch.module_channel = raid5f_get_io_channel(r5f_info->raid_bdev);
 		SPDK_CU_ASSERT_FATAL(raid_ch.module_channel);
@@ -814,14 +955,14 @@ __test_raid5f_stripe_request_map_iovecs(struct raid_bdev *raid_bdev,
 	size_t iovcnt = SPDK_COUNTOF(iovs);
 	int ret;
 
-	init_io_info(&io_info, r5f_info, raid_ch, SPDK_BDEV_IO_TYPE_WRITE, 0, 0);
+	init_io_info(&io_info, r5f_info, raid_ch, SPDK_BDEV_IO_TYPE_WRITE, 0, 0, 0);
 
 	raid_io = get_raid_io(&io_info);
 	bdev_io = spdk_bdev_io_from_ctx(raid_io);
 	bdev_io->u.bdev.iovs = iovs;
 	bdev_io->u.bdev.iovcnt = iovcnt;
 
-	stripe_req = raid5f_stripe_request_alloc(r5ch);
+	stripe_req = raid5f_stripe_request_alloc(r5ch, STRIPE_REQ_WRITE);
 	SPDK_CU_ASSERT_FATAL(stripe_req != NULL);
 
 	stripe_req->parity_chunk = &stripe_req->chunks[raid5f_stripe_data_chunks_num(raid_bdev)];
@@ -898,7 +1039,7 @@ __test_raid5f_chunk_write_error(struct raid_bdev *raid_bdev, struct raid_bdev_io
 		RAID5F_TEST_FOR_EACH_STRIPE(raid_bdev, stripe_index) {
 			RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_bdev_info) {
 				init_io_info(&io_info, r5f_info, raid_ch, SPDK_BDEV_IO_TYPE_WRITE,
-					     stripe_index * r5f_info->stripe_blocks, r5f_info->stripe_blocks);
+					     stripe_index, 0, r5f_info->stripe_blocks);
 
 				io_info.error.type = error_type;
 				io_info.error.bdev = base_bdev_info->bdev;
@@ -958,7 +1099,7 @@ __test_raid5f_chunk_write_error_with_enomem(struct raid_bdev *raid_bdev,
 				}
 
 				init_io_info(&io_info, r5f_info, raid_ch, SPDK_BDEV_IO_TYPE_WRITE,
-					     stripe_index * r5f_info->stripe_blocks, r5f_info->stripe_blocks);
+					     stripe_index, 0, r5f_info->stripe_blocks);
 
 				io_info.error.type = TEST_BDEV_ERROR_NOMEM;
 				io_info.error.bdev = base_bdev_info->bdev;
@@ -982,6 +1123,20 @@ test_raid5f_chunk_write_error_with_enomem(void)
 	run_for_each_raid5f_config(__test_raid5f_chunk_write_error_with_enomem);
 }
 
+static void
+test_raid5f_submit_full_stripe_write_request_degraded(void)
+{
+	g_test_degraded = true;
+	run_for_each_raid5f_config(__test_raid5f_submit_full_stripe_write_request);
+}
+
+static void
+test_raid5f_submit_read_request_degraded(void)
+{
+	g_test_degraded = true;
+	run_for_each_raid5f_config(__test_raid5f_submit_read_request);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -991,13 +1146,16 @@ main(int argc, char **argv)
 	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
-	suite = CU_add_suite("raid5f", test_setup, test_cleanup);
+	suite = CU_add_suite_with_setup_and_teardown("raid5f", test_suite_init, test_suite_cleanup,
+			test_setup, NULL);
 	CU_ADD_TEST(suite, test_raid5f_start);
 	CU_ADD_TEST(suite, test_raid5f_submit_read_request);
 	CU_ADD_TEST(suite, test_raid5f_stripe_request_map_iovecs);
 	CU_ADD_TEST(suite, test_raid5f_submit_full_stripe_write_request);
 	CU_ADD_TEST(suite, test_raid5f_chunk_write_error);
 	CU_ADD_TEST(suite, test_raid5f_chunk_write_error_with_enomem);
+	CU_ADD_TEST(suite, test_raid5f_submit_full_stripe_write_request_degraded);
+	CU_ADD_TEST(suite, test_raid5f_submit_read_request_degraded);
 
 	allocate_threads(1);
 	set_thread(0);
