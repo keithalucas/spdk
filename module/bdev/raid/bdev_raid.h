@@ -215,6 +215,7 @@ const char *raid_bdev_level_to_str(enum raid_level level);
 enum raid_bdev_state raid_bdev_str_to_state(const char *str);
 const char *raid_bdev_state_to_str(enum raid_bdev_state state);
 void raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ctx *w);
+int raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev);
 
 /*
  * RAID module descriptor

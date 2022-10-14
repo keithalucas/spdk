@@ -1479,7 +1479,7 @@ raid_bdev_remove_base_bdev_on_suspended(struct raid_bdev *raid_bdev, void *ctx)
  * 0 - success
  * non zero - failure
  */
-static int
+int
 raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 {
 	struct raid_bdev *raid_bdev;
