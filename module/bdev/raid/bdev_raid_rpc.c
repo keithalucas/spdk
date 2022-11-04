@@ -130,6 +130,9 @@ struct rpc_bdev_raid_create {
 
 	/* UUID for this raid bdev */
 	char *uuid;
+	
+	/* superblock support */
+	bool superblock;
 };
 
 /*
@@ -196,6 +199,7 @@ static const struct spdk_json_object_decoder rpc_bdev_raid_create_decoders[] = {
 	{"raid_level", offsetof(struct rpc_bdev_raid_create, level), decode_raid_level},
 	{"base_bdevs", offsetof(struct rpc_bdev_raid_create, base_bdevs), decode_base_bdevs},
 	{"uuid", offsetof(struct rpc_bdev_raid_create, uuid), spdk_json_decode_string, true},
+	{"superblock", offsetof(struct rpc_bdev_raid_create, superblock), spdk_json_decode_bool, true},
 };
 
 /*
