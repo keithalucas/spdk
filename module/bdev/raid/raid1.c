@@ -13,6 +13,17 @@ struct raid1_info {
 	struct raid_bdev *raid_bdev;
 };
 
+struct raid1_io_channel {
+	/* Index of last base bdev used for reads */
+	uint8_t			base_bdev_read_idx;
+
+	/* Read bandwidths generated for base_bdevs */
+	uint64_t		*base_bdev_read_bw;
+
+	/* Maximum read bandwidth from all base_bdevs */
+	uint64_t		base_bdev_max_read_bw;
+};
+
 static void
 raid1_bdev_io_completion(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
@@ -45,33 +56,76 @@ raid1_init_ext_io_opts(struct spdk_bdev_io *bdev_io, struct spdk_bdev_ext_io_opt
 	opts->metadata = bdev_io->u.bdev.md_buf;
 }
 
+static uint8_t
+raid1_channel_next_read_base_bdev(struct raid_bdev_io_channel *raid_ch)
+{
+	struct raid1_io_channel *raid1_ch = spdk_io_channel_get_ctx(raid_ch->module_channel);
+	uint8_t idx = raid1_ch->base_bdev_read_idx;
+	uint8_t i;
+
+	for (i = 0; i < raid_ch->num_channels; i++) {
+		if (++idx == raid_ch->num_channels) {
+			idx = 0;
+		}
+
+		if (raid_ch->base_channel[idx]) {
+			raid1_ch->base_bdev_read_idx = idx;
+
+			if (raid1_ch->base_bdev_read_bw[idx] < raid1_ch->base_bdev_max_read_bw) {
+				break;
+			}
+		}
+	}
+
+	return raid1_ch->base_bdev_read_idx;
+}
+
+static void
+raid1_channel_update_read_bw_counters(struct raid_bdev_io_channel *raid_ch, uint64_t pd_blocks)
+{
+	struct raid1_io_channel *raid1_ch = spdk_io_channel_get_ctx(raid_ch->module_channel);
+	uint8_t idx = raid1_ch->base_bdev_read_idx;
+	uint8_t i;
+
+	if (spdk_unlikely(raid1_ch->base_bdev_max_read_bw > UINT64_MAX - pd_blocks)) {
+		for (i = 0; i < raid_ch->num_channels; i++) {
+			raid1_ch->base_bdev_read_bw[i] = 0;
+		}
+		raid1_ch->base_bdev_max_read_bw = 0;
+	}
+
+	raid1_ch->base_bdev_read_bw[idx] += pd_blocks;
+	raid1_ch->base_bdev_max_read_bw = spdk_max(raid1_ch->base_bdev_max_read_bw,
+					  raid1_ch->base_bdev_read_bw[idx]);
+}
+
 static int
 raid1_submit_read_request(struct raid_bdev_io *raid_io)
 {
 	struct raid_bdev *raid_bdev = raid_io->raid_bdev;
 	struct spdk_bdev_io *bdev_io = spdk_bdev_io_from_ctx(raid_io);
 	struct spdk_bdev_ext_io_opts io_opts;
-	uint8_t idx = 0;
+	struct raid_bdev_io_channel *raid_ch = raid_io->raid_ch;
 	struct raid_base_bdev_info *base_info;
 	struct spdk_io_channel *base_ch = NULL;
 	uint64_t pd_lba, pd_blocks;
+	uint8_t idx;
 	int ret;
 
-	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		base_ch = raid_io->raid_ch->base_channel[idx];
-		if (base_ch != NULL) {
-			break;
-		}
-		idx++;
-	}
+	pd_lba = bdev_io->u.bdev.offset_blocks;
+	pd_blocks = bdev_io->u.bdev.num_blocks;
 
-	if (idx == raid_bdev->num_base_bdevs) {
+	idx = raid1_channel_next_read_base_bdev(raid_ch);
+
+	if (spdk_unlikely(raid_ch->base_channel[idx] == NULL)) {
 		raid_bdev_io_complete(raid_io, SPDK_BDEV_IO_STATUS_FAILED);
 		return 0;
 	}
 
-	pd_lba = bdev_io->u.bdev.offset_blocks;
-	pd_blocks = bdev_io->u.bdev.num_blocks;
+	raid1_channel_update_read_bw_counters(raid_ch, pd_blocks);
+
+	base_info = &raid_bdev->base_bdev_info[idx];
+	base_ch = raid_io->raid_ch->base_channel[idx];
 
 	raid_io->base_bdev_io_remaining = 1;
 
@@ -174,6 +228,44 @@ raid1_submit_rw_request(struct raid_bdev_io *raid_io)
 	}
 }
 
+static void
+raid1_ioch_destroy(void *io_device, void *ctx_buf)
+{
+	struct raid1_io_channel *r1ch = ctx_buf;
+
+	free(r1ch->base_bdev_read_bw);
+}
+
+static int
+raid1_ioch_create(void *io_device, void *ctx_buf)
+{
+	struct raid1_io_channel *r1ch = ctx_buf;
+	struct raid1_info *r1info = io_device;
+	struct raid_bdev *raid_bdev = r1info->raid_bdev;
+	int status = 0;
+
+	r1ch->base_bdev_read_idx = 0;
+	r1ch->base_bdev_max_read_bw = 0;
+	r1ch->base_bdev_read_bw = calloc(raid_bdev->num_base_bdevs,
+					 sizeof(*r1ch->base_bdev_read_bw));
+	if (!r1ch->base_bdev_read_bw) {
+		SPDK_ERRLOG("Failed to initialize io channel\n");
+		status = -ENOMEM;
+	}
+
+	return status;
+}
+
+static void
+raid1_io_device_unregister_done(void *io_device)
+{
+	struct raid1_info *r1info = io_device;
+
+	raid_bdev_module_stop_done(r1info->raid_bdev);
+
+	free(r1info);
+}
+
 static int
 raid1_start(struct raid_bdev *raid_bdev)
 {
@@ -199,6 +291,9 @@ raid1_start(struct raid_bdev *raid_bdev)
 	raid_bdev->bdev.blockcnt = min_blockcnt;
 	raid_bdev->module_private = r1info;
 
+	spdk_io_device_register(r1info, raid1_ioch_create, raid1_ioch_destroy,
+				sizeof(struct raid1_io_channel), NULL);
+
 	return 0;
 }
 
@@ -207,9 +302,17 @@ raid1_stop(struct raid_bdev *raid_bdev)
 {
 	struct raid1_info *r1info = raid_bdev->module_private;
 
-	free(r1info);
+	spdk_io_device_unregister(r1info, raid1_io_device_unregister_done);
 
-	return true;
+	return false;
+}
+
+static struct spdk_io_channel *
+raid1_get_io_channel(struct raid_bdev *raid_bdev)
+{
+	struct raid1_info *r1info = raid_bdev->module_private;
+
+	return spdk_get_io_channel(r1info);
 }
 
 static struct raid_bdev_module g_raid1_module = {
@@ -220,6 +323,7 @@ static struct raid_bdev_module g_raid1_module = {
 	.start = raid1_start,
 	.stop = raid1_stop,
 	.submit_rw_request = raid1_submit_rw_request,
+	.get_io_channel = raid1_get_io_channel,
 };
 RAID_MODULE_REGISTER(&g_raid1_module)
 
