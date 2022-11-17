@@ -130,7 +130,7 @@ struct rpc_bdev_raid_create {
 
 	/* UUID for this raid bdev */
 	char *uuid;
-	
+
 	/* superblock support */
 	bool superblock;
 };
@@ -241,7 +241,7 @@ rpc_bdev_raid_create(struct spdk_jsonrpc_request *request,
 	}
 
 	rc = raid_bdev_create(req.name, req.strip_size_kb, req.base_bdevs.num_base_bdevs,
-			      req.level, &raid_bdev, uuid);
+			      req.level, &raid_bdev, uuid, req.superblock);
 	if (rc != 0) {
 		spdk_jsonrpc_send_error_response_fmt(request, rc,
 						     "Failed to create RAID bdev %s: %s",
