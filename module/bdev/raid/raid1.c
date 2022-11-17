@@ -63,7 +63,7 @@ raid1_submit_read_request(struct raid_bdev_io *raid_io)
 	raid_io->base_bdev_io_remaining = 1;
 
 	raid1_init_ext_io_opts(bdev_io, &io_opts);
-	ret = spdk_bdev_readv_blocks_ext(base_info->desc, base_ch,
+	ret = raid_bdev_readv_blocks_ext(base_info, base_ch,
 					 bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
 					 pd_lba, pd_blocks, raid1_bdev_io_completion,
 					 raid_io, &io_opts);
@@ -104,7 +104,7 @@ raid1_submit_write_request(struct raid_bdev_io *raid_io)
 		base_info = &raid_bdev->base_bdev_info[idx];
 		base_ch = raid_io->raid_ch->base_channel[idx];
 
-		ret = spdk_bdev_writev_blocks_ext(base_info->desc, base_ch,
+		ret = raid_bdev_writev_blocks_ext(base_info, base_ch,
 						  bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
 						  pd_lba, pd_blocks, raid1_bdev_io_completion,
 						  raid_io, &io_opts);
@@ -166,7 +166,11 @@ raid1_start(struct raid_bdev *raid_bdev)
 	r1info->raid_bdev = raid_bdev;
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		min_blockcnt = spdk_min(min_blockcnt, base_info->bdev->blockcnt);
+		min_blockcnt = spdk_min(min_blockcnt, base_info->data_size);
+	}
+
+	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+		base_info->data_size = min_blockcnt;
 	}
 
 	raid_bdev->bdev.blockcnt = min_blockcnt;

@@ -387,7 +387,7 @@ raid5f_chunk_write(struct chunk *chunk)
 	raid5f_init_ext_io_opts(bdev_io, &chunk->ext_opts);
 	chunk->ext_opts.metadata = chunk->md_buf;
 
-	ret = spdk_bdev_writev_blocks_ext(base_info->desc, base_ch, chunk->iovs, chunk->iovcnt,
+	ret = raid_bdev_writev_blocks_ext(base_info, base_ch, chunk->iovs, chunk->iovcnt,
 					  base_offset_blocks, raid_bdev->strip_size, raid5f_chunk_write_complete_bdev_io,
 					  chunk, &chunk->ext_opts);
 
@@ -577,7 +577,7 @@ raid5f_submit_read_request(struct raid_bdev_io *raid_io, uint64_t stripe_index,
 	int ret;
 
 	raid5f_init_ext_io_opts(bdev_io, &io_opts);
-	ret = spdk_bdev_readv_blocks_ext(base_info->desc, base_ch, bdev_io->u.bdev.iovs,
+	ret = raid_bdev_readv_blocks_ext(base_info, base_ch, bdev_io->u.bdev.iovs,
 					 bdev_io->u.bdev.iovcnt,
 					 base_offset_blocks, bdev_io->u.bdev.num_blocks, raid5f_chunk_read_complete, raid_io,
 					 &io_opts);
@@ -765,6 +765,7 @@ static int
 raid5f_start(struct raid_bdev *raid_bdev)
 {
 	uint64_t min_blockcnt = UINT64_MAX;
+	uint64_t base_bdev_data_size;
 	struct raid_base_bdev_info *base_info;
 	struct raid5f_info *r5f_info;
 	size_t alignment = 0;
@@ -777,11 +778,17 @@ raid5f_start(struct raid_bdev *raid_bdev)
 	r5f_info->raid_bdev = raid_bdev;
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		min_blockcnt = spdk_min(min_blockcnt, base_info->bdev->blockcnt);
+		min_blockcnt = spdk_min(min_blockcnt, base_info->data_size);
 		alignment = spdk_max(alignment, spdk_bdev_get_buf_align(base_info->bdev));
 	}
 
-	r5f_info->total_stripes = min_blockcnt / raid_bdev->strip_size;
+	base_bdev_data_size = (min_blockcnt / raid_bdev->strip_size) * raid_bdev->strip_size;
+
+	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+		base_info->data_size = base_bdev_data_size;
+	}
+
+	r5f_info->total_stripes = base_bdev_data_size / raid_bdev->strip_size;
 	r5f_info->stripe_blocks = raid_bdev->strip_size * raid5f_stripe_data_chunks_num(raid_bdev);
 	r5f_info->buf_alignment = alignment;
 

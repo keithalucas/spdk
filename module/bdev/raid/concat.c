@@ -110,12 +110,12 @@ concat_submit_rw_request(struct raid_bdev_io *raid_io)
 	io_opts.metadata = bdev_io->u.bdev.md_buf;
 
 	if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
-		ret = spdk_bdev_readv_blocks_ext(base_info->desc, base_ch,
+		ret = raid_bdev_readv_blocks_ext(base_info, base_ch,
 						 bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
 						 pd_lba, pd_blocks, concat_bdev_io_completion,
 						 raid_io, &io_opts);
 	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE) {
-		ret = spdk_bdev_writev_blocks_ext(base_info->desc, base_ch,
+		ret = raid_bdev_writev_blocks_ext(base_info, base_ch,
 						  bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
 						  pd_lba, pd_blocks, concat_bdev_io_completion,
 						  raid_io, &io_opts);
@@ -242,12 +242,12 @@ concat_submit_null_payload_request(struct raid_bdev_io *raid_io)
 		base_ch = raid_io->raid_ch->base_channel[i];
 		switch (bdev_io->type) {
 		case SPDK_BDEV_IO_TYPE_UNMAP:
-			ret = spdk_bdev_unmap_blocks(base_info->desc, base_ch,
+			ret = raid_bdev_unmap_blocks(base_info, base_ch,
 						     pd_lba, pd_blocks,
 						     concat_base_io_complete, raid_io);
 			break;
 		case SPDK_BDEV_IO_TYPE_FLUSH:
-			ret = spdk_bdev_flush_blocks(base_info->desc, base_ch,
+			ret = raid_bdev_flush_blocks(base_info, base_ch,
 						     pd_lba, pd_blocks,
 						     concat_base_io_complete, raid_io);
 			break;
@@ -287,8 +287,10 @@ concat_start(struct raid_bdev *raid_bdev)
 
 	int idx = 0;
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		uint64_t strip_cnt = base_info->bdev->blockcnt >> raid_bdev->strip_size_shift;
+		uint64_t strip_cnt = base_info->data_size >> raid_bdev->strip_size_shift;
 		uint64_t pd_block_cnt = strip_cnt << raid_bdev->strip_size_shift;
+
+		base_info->data_size = pd_block_cnt;
 
 		block_range[idx].start = total_blockcnt;
 		block_range[idx].length = pd_block_cnt;
