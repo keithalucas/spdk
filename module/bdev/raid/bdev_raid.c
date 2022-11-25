@@ -209,16 +209,16 @@ raid_bdev_cleanup_and_free(struct raid_bdev *raid_bdev)
  * brief:
  * free resource of base bdev for raid bdev
  * params:
- * raid_bdev - pointer to raid bdev
  * base_info - raid base bdev info
  * returns:
  * 0 - success
  * non zero - failure
  */
 static void
-raid_bdev_free_base_bdev_resource(struct raid_bdev *raid_bdev,
-				  struct raid_base_bdev_info *base_info)
+raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 {
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
 	free(base_info->name);
@@ -276,7 +276,7 @@ _raid_bdev_destruct(void *ctxt)
 		 * layers.  Also close the descriptors if we have started shutdown.
 		 */
 		if (g_shutdown_started || base_info->remove_scheduled == true) {
-			raid_bdev_free_base_bdev_resource(raid_bdev, base_info);
+			raid_bdev_free_base_bdev_resource(base_info);
 		}
 	}
 
@@ -946,6 +946,7 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	struct raid_bdev *raid_bdev;
 	struct spdk_bdev *raid_bdev_gen;
 	struct raid_bdev_module *module;
+	struct raid_base_bdev_info *base_info;
 	uint8_t min_operational;
 	int rc;
 
@@ -1020,6 +1021,10 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		SPDK_ERRLOG("Unable able to allocate base bdev info\n");
 		free(raid_bdev);
 		return -ENOMEM;
+	}
+
+	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+		base_info->raid_bdev = raid_bdev;
 	}
 
 	/* strip_size_kb is from the rpc param.  strip_size is in blocks and used
@@ -1225,19 +1230,14 @@ raid_bdev_deconfigure(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn,
 
 /*
  * brief:
- * raid_bdev_find_by_base_bdev function finds the raid bdev which has
- *  claimed the base bdev.
+ * raid_bdev_find_base_info_by_bdev function finds the base bdev info by bdev.
  * params:
- * base_bdev - pointer to base bdev pointer
- * _raid_bdev - Reference to pointer to raid bdev
- * _base_info - Reference to the raid base bdev info.
+ * base_bdev - pointer to base bdev
  * returns:
- * true - if the raid bdev is found.
- * false - if the raid bdev is not found.
+ * base bdev info if found, otherwise NULL.
  */
-static bool
-raid_bdev_find_by_base_bdev(struct spdk_bdev *base_bdev, struct raid_bdev **_raid_bdev,
-			    struct raid_base_bdev_info **_base_info)
+static struct raid_base_bdev_info *
+raid_bdev_find_base_info_by_bdev(struct spdk_bdev *base_bdev)
 {
 	struct raid_bdev *raid_bdev;
 	struct raid_base_bdev_info *base_info;
@@ -1245,14 +1245,12 @@ raid_bdev_find_by_base_bdev(struct spdk_bdev *base_bdev, struct raid_bdev **_rai
 	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
 		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 			if (base_info->bdev == base_bdev) {
-				*_raid_bdev = raid_bdev;
-				*_base_info = base_info;
-				return true;
+				return base_info;
 			}
 		}
 	}
 
-	return false;
+	return NULL;
 }
 
 typedef void (*raid_bdev_suspended_cb)(struct raid_bdev *raid_bdev, void *ctx);
@@ -1419,16 +1417,18 @@ raid_bdev_resume(struct raid_bdev *raid_bdev)
 static void
 raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 {
-	struct raid_bdev	*raid_bdev = NULL;
+	struct raid_bdev *raid_bdev;
 	struct raid_base_bdev_info *base_info;
 
 	SPDK_DEBUGLOG(bdev_raid, "raid_bdev_remove_base_bdev\n");
 
 	/* Find the raid_bdev which has claimed this base_bdev */
-	if (!raid_bdev_find_by_base_bdev(base_bdev, &raid_bdev, &base_info)) {
+	base_info = raid_bdev_find_base_info_by_bdev(base_bdev);
+	if (!base_info) {
 		SPDK_ERRLOG("bdev to remove '%s' not found\n", base_bdev->name);
 		return;
 	}
+	raid_bdev = base_info->raid_bdev;
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
@@ -1440,7 +1440,7 @@ raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 		 * As raid bdev is not registered yet or already unregistered,
 		 * so cleanup should be done here itself.
 		 */
-		raid_bdev_free_base_bdev_resource(raid_bdev, base_info);
+		raid_bdev_free_base_bdev_resource(base_info);
 		if (raid_bdev->num_base_bdevs_discovered == 0) {
 			/* There is no base bdev for this raid, so free the raid device. */
 			raid_bdev_cleanup_and_free(raid_bdev);
@@ -1464,16 +1464,19 @@ raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 static void
 raid_bdev_resize_base_bdev(struct spdk_bdev *base_bdev)
 {
-	struct raid_bdev	*raid_bdev = NULL;
+	struct raid_bdev *raid_bdev;
 	struct raid_base_bdev_info *base_info;
 
 	SPDK_DEBUGLOG(bdev_raid, "raid_bdev_resize_base_bdev\n");
 
+	base_info = raid_bdev_find_base_info_by_bdev(base_bdev);
+
 	/* Find the raid_bdev which has claimed this base_bdev */
-	if (!raid_bdev_find_by_base_bdev(base_bdev, &raid_bdev, &base_info)) {
+	if (!base_info) {
 		SPDK_ERRLOG("raid_bdev whose base_bdev '%s' not found\n", base_bdev->name);
 		return;
 	}
+	raid_bdev = base_info->raid_bdev;
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
@@ -1547,7 +1550,7 @@ raid_bdev_delete(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn, void 
 			 * As raid bdev is not registered yet or already unregistered,
 			 * so cleanup should be done here itself.
 			 */
-			raid_bdev_free_base_bdev_resource(raid_bdev, base_info);
+			raid_bdev_free_base_bdev_resource(base_info);
 		}
 	}
 
@@ -1563,8 +1566,9 @@ raid_bdev_delete(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn, void 
 }
 
 static int
-raid_bdev_configure_base_bdev(struct raid_bdev *raid_bdev, struct raid_base_bdev_info *base_info)
+raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 {
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
 	struct spdk_bdev_desc *desc;
 	struct spdk_bdev *bdev;
 	int rc;
@@ -1667,7 +1671,7 @@ raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t
 		return -ENOMEM;
 	}
 
-	rc = raid_bdev_configure_base_bdev(raid_bdev, base_info);
+	rc = raid_bdev_configure_base_bdev(base_info);
 	if (rc != 0) {
 		if (rc != -ENODEV) {
 			SPDK_ERRLOG("Failed to allocate resource for bdev '%s'\n", name);
@@ -1697,7 +1701,7 @@ raid_bdev_examine(struct spdk_bdev *bdev)
 	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
 		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 			if (base_info->bdev == NULL && strcmp(bdev->name, base_info->name) == 0) {
-				raid_bdev_configure_base_bdev(raid_bdev, base_info);
+				raid_bdev_configure_base_bdev(base_info);
 				break;
 			}
 		}
