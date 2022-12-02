@@ -7232,7 +7232,7 @@ bdev_register(struct spdk_bdev *bdev)
 	/* UUID has to be specified by the user or defined by bdev itself.
 	 * Otherwise this field must remain empty, to indicate that this
 	 * value cannot be depended upon. */
-	if (!spdk_mem_all_zero(&bdev->uuid, sizeof(bdev->uuid))) {
+	if (!spdk_uuid_is_null(&bdev->uuid)) {
 		/* Add the UUID alias only if it's different than the name */
 		spdk_uuid_fmt_lower(uuid, sizeof(uuid), &bdev->uuid);
 		if (strcmp(bdev->name, uuid) != 0) {

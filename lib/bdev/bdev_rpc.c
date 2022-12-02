@@ -683,7 +683,7 @@ rpc_dump_bdev_info(void *ctx, struct spdk_bdev *bdev)
 
 	spdk_json_write_named_uint64(w, "num_blocks", spdk_bdev_get_num_blocks(bdev));
 
-	if (!spdk_mem_all_zero(&bdev->uuid, sizeof(bdev->uuid))) {
+	if (!spdk_uuid_is_null(&bdev->uuid)) {
 		char uuid_str[SPDK_UUID_STRING_LEN];
 
 		spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &bdev->uuid);

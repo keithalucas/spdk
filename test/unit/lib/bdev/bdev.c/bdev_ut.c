@@ -5837,7 +5837,7 @@ bdev_register_uuid_alias(void)
 	bdev = allocate_bdev("bdev0");
 
 	/* Make sure an UUID was generated  */
-	CU_ASSERT_FALSE(spdk_mem_all_zero(&bdev->uuid, sizeof(bdev->uuid)));
+	CU_ASSERT_FALSE(spdk_uuid_is_null(&bdev->uuid));
 
 	/* Check that an UUID alias was registered */
 	spdk_uuid_fmt_lower(uuid, sizeof(uuid), &bdev->uuid);
