@@ -191,13 +191,13 @@ raid_bdev_cleanup(struct raid_bdev *raid_bdev)
 	}
 
 	TAILQ_REMOVE(&g_raid_bdev_list, raid_bdev, global_link);
-	free(raid_bdev->base_bdev_info);
 }
 
 static void
 raid_bdev_free(struct raid_bdev *raid_bdev)
 {
 	pthread_mutex_destroy(&raid_bdev->mutex);
+	free(raid_bdev->base_bdev_info);
 	free(raid_bdev->bdev.name);
 	free(raid_bdev);
 }
@@ -1034,13 +1034,20 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		return -ENOMEM;
 	}
 
+	rc = pthread_mutex_init(&raid_bdev->mutex, NULL);
+	if (rc) {
+		SPDK_ERRLOG("Cannot init mutex for raid bdev\n");
+		free(raid_bdev);
+		return rc;
+	}
+
 	raid_bdev->module = module;
 	raid_bdev->num_base_bdevs = num_base_bdevs;
 	raid_bdev->base_bdev_info = calloc(raid_bdev->num_base_bdevs,
 					   sizeof(struct raid_base_bdev_info));
 	if (!raid_bdev->base_bdev_info) {
 		SPDK_ERRLOG("Unable able to allocate base bdev info\n");
-		free(raid_bdev);
+		raid_bdev_free(raid_bdev);
 		return -ENOMEM;
 	}
 
@@ -1058,22 +1065,13 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	raid_bdev->min_base_bdevs_operational = min_operational;
 	raid_bdev->superblock_enabled = superblock;
 	TAILQ_INIT(&raid_bdev->suspend_ctx);
-	rc = pthread_mutex_init(&raid_bdev->mutex, NULL);
-	if (rc) {
-		SPDK_ERRLOG("Cannot init mutex for raid bdev\n");
-		free(raid_bdev->base_bdev_info);
-		free(raid_bdev);
-		return rc;
-	}
 
 	raid_bdev_gen = &raid_bdev->bdev;
 
 	raid_bdev_gen->name = strdup(name);
 	if (!raid_bdev_gen->name) {
 		SPDK_ERRLOG("Unable to allocate name for raid\n");
-		pthread_mutex_destroy(&raid_bdev->mutex);
-		free(raid_bdev->base_bdev_info);
-		free(raid_bdev);
+		raid_bdev_free(raid_bdev);
 		return -ENOMEM;
 	}
 
