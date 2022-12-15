@@ -225,23 +225,27 @@ raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
-	free(base_info->name);
-	base_info->name = NULL;
-
-	if (base_info->bdev == NULL) {
-		return;
+	if (base_info->bdev != NULL) {
+		assert(base_info->desc);
+		assert(raid_bdev->num_base_bdevs_discovered);
+		raid_bdev->num_base_bdevs_discovered--;
+		spdk_bdev_module_release_bdev(base_info->bdev);
+		base_info->bdev = NULL;
 	}
 
-	assert(base_info->desc);
-	spdk_bdev_module_release_bdev(base_info->bdev);
-	spdk_bdev_close(base_info->desc);
-	base_info->desc = NULL;
-	base_info->bdev = NULL;
-	spdk_put_io_channel(base_info->app_thread_ch);
-	base_info->app_thread_ch = NULL;
+	if (base_info->app_thread_ch != NULL) {
+		spdk_put_io_channel(base_info->app_thread_ch);
+		base_info->app_thread_ch = NULL;
+	}
 
-	assert(raid_bdev->num_base_bdevs_discovered);
-	raid_bdev->num_base_bdevs_discovered--;
+	if (base_info->desc != NULL) {
+		spdk_bdev_close(base_info->desc);
+		base_info->desc = NULL;
+	}
+
+	free(base_info->name);
+	base_info->name = NULL;
+	spdk_uuid_set_null(&base_info->uuid);
 }
 
 static void
@@ -928,7 +932,7 @@ static struct spdk_bdev_module g_raid_if = {
 	.fini_start = raid_bdev_fini_start,
 	.module_fini = raid_bdev_exit,
 	.get_ctx_size = raid_bdev_get_ctx_size,
-	.examine_config = raid_bdev_examine,
+	.examine_disk = raid_bdev_examine,
 	.async_init = false,
 	.async_fini = false,
 };
@@ -1361,7 +1365,18 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	}
 
 	if (raid_bdev->sb != NULL) {
-		raid_bdev_init_superblock(raid_bdev);
+		if (spdk_uuid_is_null(&raid_bdev->sb->uuid)) {
+			raid_bdev_init_superblock(raid_bdev);
+		} else {
+			if (raid_bdev->sb->block_size != blocklen) {
+				SPDK_ERRLOG("blocklen does not match value in superblock\n");
+				return -EINVAL;
+			}
+			if (raid_bdev->sb->raid_size != raid_bdev->bdev.blockcnt) {
+				SPDK_ERRLOG("blockcnt does not match value in superblock\n");
+				return -EINVAL;
+			}
+		}
 
 		return raid_bdev_write_superblock(raid_bdev, raid_bdev_configure_write_sb_cb);
 	}
@@ -1793,11 +1808,40 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 	struct raid_bdev *raid_bdev = base_info->raid_bdev;
 	struct spdk_bdev_desc *desc;
 	struct spdk_bdev *bdev;
+	const struct spdk_uuid *bdev_uuid;
 	int rc;
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
-	assert(base_info->name != NULL);
 	assert(base_info->bdev == NULL);
+
+	if (!spdk_uuid_is_null(&base_info->uuid)) {
+		const char *bdev_name;
+
+		for (bdev = spdk_bdev_first(); bdev != NULL; bdev = spdk_bdev_next(bdev)) {
+			if (spdk_uuid_compare(&base_info->uuid, spdk_bdev_get_uuid(bdev)) == 0) {
+				break;
+			}
+		}
+
+		if (bdev == NULL) {
+			return -ENODEV;
+		}
+
+		bdev_name = spdk_bdev_get_name(bdev);
+
+		if (base_info->name == NULL) {
+			base_info->name = strdup(bdev_name);
+			if (base_info->name == NULL) {
+				return -ENOMEM;
+			}
+		} else if (strcmp(base_info->name, bdev_name) != 0) {
+			SPDK_ERRLOG("Name mismatch for base bdev '%s' - expected '%s'\n",
+				    bdev_name, base_info->name);
+			return -EINVAL;
+		}
+	}
+
+	assert(base_info->name != NULL);
 
 	rc = spdk_bdev_open_ext(base_info->name, true, raid_bdev_event_base_bdev, NULL, &desc);
 	if (rc != 0) {
@@ -1808,9 +1852,18 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 	}
 
 	bdev = spdk_bdev_desc_get_bdev(desc);
+	bdev_uuid = spdk_bdev_get_uuid(bdev);
 
-	if (raid_bdev->sb != NULL && spdk_uuid_is_null(spdk_bdev_get_uuid(bdev))) {
+	if (raid_bdev->sb != NULL && spdk_uuid_is_null(bdev_uuid)) {
 		SPDK_ERRLOG("Base bdev '%s' does not have a valid UUID\n", base_info->name);
+		spdk_bdev_close(desc);
+		return -EINVAL;
+	}
+
+	if (spdk_uuid_is_null(&base_info->uuid)) {
+		spdk_uuid_copy(&base_info->uuid, bdev_uuid);
+	} else if (spdk_uuid_compare(&base_info->uuid, bdev_uuid) != 0) {
+		SPDK_ERRLOG("UUID mismatch for base bdev '%s'\n", base_info->name);
 		spdk_bdev_close(desc);
 		return -EINVAL;
 	}
@@ -1834,38 +1887,102 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 		return -ENOMEM;
 	}
 
+	if (base_info->data_offset == 0 && raid_bdev->sb != NULL) {
+		assert((RAID_BDEV_MIN_DATA_OFFSET_SIZE % bdev->blocklen) == 0);
+		base_info->data_offset = RAID_BDEV_MIN_DATA_OFFSET_SIZE / bdev->blocklen;
+	}
+
+	if (bdev->optimal_io_boundary) {
+		base_info->data_offset = spdk_divide_round_up(base_info->data_offset,
+					 bdev->optimal_io_boundary) * bdev->optimal_io_boundary;
+	}
+
+	if (base_info->data_offset > bdev->blockcnt) {
+		SPDK_ERRLOG("Data offset %lu exceeds base bdev capacity %lu on bdev '%s'\n",
+			    base_info->data_offset, bdev->blockcnt, base_info->name);
+		rc = -EINVAL;
+		goto out;
+	}
+
+	if (base_info->data_size == 0) {
+		base_info->data_size = bdev->blockcnt - base_info->data_offset;
+	} else if (base_info->data_offset + base_info->data_size > bdev->blockcnt) {
+		SPDK_ERRLOG("Data offset and size exceeds base bdev capacity %lu on bdev '%s'\n",
+			    bdev->blockcnt, base_info->name);
+		rc = -EINVAL;
+		goto out;
+	}
+
 	base_info->bdev = bdev;
 	base_info->desc = desc;
 	base_info->blockcnt = bdev->blockcnt;
-	base_info->data_offset = 0;
-	base_info->data_size = base_info->bdev->blockcnt;
+
 	raid_bdev->num_base_bdevs_discovered++;
 	assert(raid_bdev->num_base_bdevs_discovered <= raid_bdev->num_base_bdevs);
-
-	if (raid_bdev->sb != NULL) {
-		assert((RAID_BDEV_MIN_DATA_OFFSET_SIZE % bdev->blocklen) == 0);
-		base_info->data_offset = RAID_BDEV_MIN_DATA_OFFSET_SIZE / bdev->blocklen;
-
-		if (bdev->optimal_io_boundary) {
-			base_info->data_offset = spdk_divide_round_up(base_info->data_offset,
-						 bdev->optimal_io_boundary) * bdev->optimal_io_boundary;
-		}
-
-		base_info->data_size = base_info->bdev->blockcnt - base_info->data_offset;
-
-		if (base_info->data_offset > bdev->blockcnt) {
-			SPDK_ERRLOG("Data offset %lu exceeds base bdev capacity %lu on bdev '%s'\n",
-				    base_info->data_offset, bdev->blockcnt, base_info->name);
-			return -EINVAL;
-		}
-	}
 
 	if (raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs) {
 		rc = raid_bdev_configure(raid_bdev);
 		if (rc != 0) {
-			SPDK_ERRLOG("Failed to configure raid bdev\n");
-			return rc;
+			SPDK_ERRLOG("Failed to configure raid bdev: %s\n", spdk_strerror(-rc));
 		}
+	}
+out:
+	if (rc != 0) {
+		raid_bdev_free_base_bdev_resource(base_info);
+	}
+	return rc;
+}
+
+static int
+_raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name,
+			   const struct spdk_uuid *uuid, uint8_t slot, uint64_t data_offset, uint64_t data_size)
+{
+	struct raid_base_bdev_info *base_info;
+	int rc;
+
+	assert(name != NULL || uuid != NULL);
+
+	if (slot >= raid_bdev->num_base_bdevs) {
+		return -EINVAL;
+	}
+
+	base_info = &raid_bdev->base_bdev_info[slot];
+
+	if (base_info->name != NULL) {
+		SPDK_ERRLOG("Slot %u on raid bdev '%s' already assigned to bdev '%s'\n",
+			    slot, raid_bdev->bdev.name, base_info->name);
+		return -EBUSY;
+	}
+
+	if (!spdk_uuid_is_null(&base_info->uuid)) {
+		char uuid_str[SPDK_UUID_STRING_LEN];
+
+		spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &base_info->uuid);
+		SPDK_ERRLOG("Slot %u on raid bdev '%s' already assigned to bdev with uuid %s\n",
+			    slot, raid_bdev->bdev.name, uuid_str);
+		return -EBUSY;
+	}
+
+	if (name != NULL) {
+		base_info->name = strdup(name);
+		if (base_info->name == NULL) {
+			return -ENOMEM;
+		}
+	}
+
+	if (uuid != NULL) {
+		spdk_uuid_copy(&base_info->uuid, uuid);
+	}
+
+	base_info->data_offset = data_offset;
+	base_info->data_size = data_size;
+
+	rc = raid_bdev_configure_base_bdev(base_info);
+	if (rc != 0) {
+		if (rc != -ENODEV) {
+			SPDK_ERRLOG("Failed to allocate resource for base bdev\n");
+		}
+		return rc;
 	}
 
 	return 0;
@@ -1887,35 +2004,227 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 int
 raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t slot)
 {
-	struct raid_base_bdev_info *base_info;
+	return _raid_bdev_add_base_device(raid_bdev, name, NULL, slot, 0, 0);
+}
+
+static int
+raid_bdev_add_base_device_from_sb(struct raid_bdev *raid_bdev,
+				  const struct raid_bdev_sb_base_bdev *sb_base_bdev)
+{
 	int rc;
 
-	if (slot >= raid_bdev->num_base_bdevs) {
-		return -EINVAL;
+	rc = _raid_bdev_add_base_device(raid_bdev, NULL, &sb_base_bdev->uuid, sb_base_bdev->slot,
+					sb_base_bdev->data_offset, sb_base_bdev->data_size);
+
+	if (rc == -ENODEV) {
+		rc = 0;
 	}
 
-	base_info = &raid_bdev->base_bdev_info[slot];
+	return rc;
+}
 
-	if (base_info->name != NULL) {
-		SPDK_ERRLOG("Slot %u on raid bdev '%s' already assigned to bdev '%s'\n",
-			    slot, raid_bdev->bdev.name, base_info->name);
-		return -EBUSY;
-	}
+static int
+raid_bdev_create_from_sb(const struct raid_bdev_superblock *sb)
+{
+	struct raid_bdev *raid_bdev;
+	uint8_t i;
+	int rc;
 
-	base_info->name = strdup(name);
-	if (base_info->name == NULL) {
-		return -ENOMEM;
-	}
-
-	rc = raid_bdev_configure_base_bdev(base_info);
+	rc = _raid_bdev_create(sb->name, (sb->strip_size * sb->block_size) / 1024, sb->num_base_bdevs,
+			       sb->level, true, &raid_bdev);
 	if (rc != 0) {
-		if (rc != -ENODEV) {
-			SPDK_ERRLOG("Failed to allocate resource for bdev '%s'\n", name);
-		}
 		return rc;
 	}
 
+	spdk_uuid_copy(&raid_bdev->bdev.uuid, &sb->uuid);
+
+	assert(sb->length <= RAID_BDEV_SB_MAX_LENGTH);
+	memcpy(raid_bdev->sb, sb, sb->length);
+
+	for (i = 0; i < sb->base_bdevs_size; i++) {
+		const struct raid_bdev_sb_base_bdev *sb_base_bdev = &sb->base_bdevs[i];
+
+		if (sb_base_bdev->state == RAID_SB_BASE_BDEV_CONFIGURED) {
+			rc = raid_bdev_add_base_device_from_sb(raid_bdev, sb_base_bdev);
+			if (rc != 0) {
+				goto err;
+			}
+		}
+	}
+
 	return 0;
+err:
+	raid_bdev_delete(raid_bdev, NULL, NULL);
+	return rc;
+}
+
+static void
+raid_bdev_examine_no_sb(struct spdk_bdev *bdev)
+{
+	struct raid_bdev *raid_bdev;
+	struct raid_base_bdev_info *base_info;
+
+	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
+		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+			if (base_info->bdev == NULL && base_info->name != NULL &&
+			    strcmp(bdev->name, base_info->name) == 0) {
+				assert(raid_bdev->sb == NULL);
+				raid_bdev_configure_base_bdev(base_info);
+				break;
+			}
+		}
+	}
+}
+
+static void
+raid_bdev_examine_sb(const struct raid_bdev_superblock *sb, struct spdk_bdev *bdev)
+{
+	const struct raid_bdev_sb_base_bdev *sb_base_bdev;
+	struct raid_bdev *raid_bdev;
+	uint8_t i;
+	int rc;
+
+	if (sb->block_size != bdev->blocklen) {
+		SPDK_ERRLOG("Bdev %s block size does not match the value in superblock\n",
+			    bdev->name);
+		return;
+	}
+
+	if (spdk_uuid_is_null(&sb->uuid)) {
+		SPDK_ERRLOG("Invalid raid bdev UUID in superblock on bdev %s\n", bdev->name);
+		return;
+	}
+
+	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
+		if (spdk_uuid_compare(&raid_bdev->bdev.uuid, &sb->uuid) == 0) {
+			break;
+		}
+	}
+
+	if (raid_bdev) {
+		if (sb->seq_number > raid_bdev->sb->seq_number) {
+			SPDK_DEBUGLOG(bdev_raid,
+				      "raid superblock seq_number on bdev %s (%lu) greater than existing raid bdev %s (%lu)\n",
+				      bdev->name, sb->seq_number, raid_bdev->bdev.name, raid_bdev->sb->seq_number);
+
+			if (raid_bdev->state != RAID_BDEV_STATE_CONFIGURING) {
+				SPDK_WARNLOG("Newer version of raid bdev %s superblock found on bdev %s but raid bdev is not in configuring state.\n",
+					     raid_bdev->bdev.name, bdev->name);
+				return;
+			}
+
+			/* remove and then recreate the raid bdev using the newer superblock */
+			raid_bdev_delete(raid_bdev, NULL, NULL);
+			raid_bdev = NULL;
+		} else if (sb->seq_number < raid_bdev->sb->seq_number) {
+			SPDK_DEBUGLOG(bdev_raid,
+				      "raid superblock seq_number on bdev %s (%lu) smaller than existing raid bdev %s (%lu)\n",
+				      bdev->name, sb->seq_number, raid_bdev->bdev.name, raid_bdev->sb->seq_number);
+			/* use the current raid bdev superblock */
+			sb = raid_bdev->sb;
+		}
+	}
+
+	for (i = 0; i < sb->base_bdevs_size; i++) {
+		sb_base_bdev = &sb->base_bdevs[i];
+
+		assert(spdk_uuid_is_null(&sb_base_bdev->uuid) == false);
+
+		if (spdk_uuid_compare(&sb_base_bdev->uuid, spdk_bdev_get_uuid(bdev)) == 0) {
+			break;
+		}
+	}
+
+	if (i == sb->base_bdevs_size) {
+		SPDK_DEBUGLOG(bdev_raid, "raid superblock does not contain this bdev's uuid\n");
+		return;
+	}
+
+	if (!raid_bdev) {
+		rc = raid_bdev_create_from_sb(sb);
+		if (rc != 0) {
+			SPDK_ERRLOG("Failed to create raid bdev %s: %s\n",
+				    sb->name, spdk_strerror(-rc));
+		}
+		return;
+	}
+
+	if (sb_base_bdev->state == RAID_SB_BASE_BDEV_CONFIGURED) {
+		struct raid_base_bdev_info *iter, *base_info = NULL;
+
+		RAID_FOR_EACH_BASE_BDEV(raid_bdev, iter) {
+			if (!spdk_uuid_is_null(&iter->uuid) &&
+			    spdk_uuid_compare(&iter->uuid, spdk_bdev_get_uuid(bdev)) == 0) {
+				base_info = iter;
+				break;
+			}
+		}
+
+		if (base_info == NULL) {
+			SPDK_ERRLOG("Bdev %s is not a member of raid bdev %s\n",
+				    bdev->name, raid_bdev->bdev.name);
+			return;
+		}
+
+		rc = raid_bdev_configure_base_bdev(base_info);
+		if (rc != 0) {
+			SPDK_ERRLOG("Failed to configure bdev %s as base bdev of raid %s: %s\n",
+				    bdev->name, raid_bdev->bdev.name, spdk_strerror(-rc));
+		}
+	} else {
+		SPDK_NOTICELOG("Bdev %s is not an active member of raid bdev %s. Ignoring.\n",
+			       bdev->name, raid_bdev->bdev.name);
+	}
+}
+
+struct raid_bdev_examine_ctx {
+	struct spdk_bdev_desc *desc;
+	struct spdk_io_channel *ch;
+};
+
+static void
+raid_bdev_examine_ctx_free(struct raid_bdev_examine_ctx *ctx)
+{
+	if (ctx->ch) {
+		spdk_put_io_channel(ctx->ch);
+	}
+
+	if (ctx->desc) {
+		spdk_bdev_close(ctx->desc);
+	}
+
+	free(ctx);
+}
+
+static void
+raid_bdev_examine_load_sb_cb(const struct raid_bdev_superblock *sb, int status, void *_ctx)
+{
+	struct raid_bdev_examine_ctx *ctx = _ctx;
+	struct spdk_bdev *bdev = spdk_bdev_desc_get_bdev(ctx->desc);
+
+	switch (status) {
+	case 0:
+		/* valid superblock found */
+		SPDK_DEBUGLOG(bdev_raid, "raid superblock found on bdev %s\n", bdev->name);
+		raid_bdev_examine_sb(sb, bdev);
+		break;
+	case -EINVAL:
+		/* no valid superblock, check if it can be claimed anyway */
+		raid_bdev_examine_no_sb(bdev);
+		break;
+	default:
+		SPDK_ERRLOG("Failed to examine bdev %s: %s\n",
+			    bdev->name, spdk_strerror(-status));
+		break;
+	}
+
+	raid_bdev_examine_ctx_free(ctx);
+	spdk_bdev_module_examine_done(&g_raid_if);
+}
+
+static void
+raid_bdev_examine_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *event_ctx)
+{
 }
 
 /*
@@ -1931,19 +2240,40 @@ raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t
 static void
 raid_bdev_examine(struct spdk_bdev *bdev)
 {
-	struct raid_bdev *raid_bdev;
-	struct raid_base_bdev_info *base_info;
+	struct raid_bdev_examine_ctx *ctx;
+	int rc;
 
-	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
-		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-			if (base_info->bdev == NULL && base_info->name != NULL &&
-			    strcmp(bdev->name, base_info->name) == 0) {
-				raid_bdev_configure_base_bdev(base_info);
-				break;
-			}
-		}
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		SPDK_ERRLOG("Failed to examine bdev %s: %s\n",
+			    bdev->name, spdk_strerror(ENOMEM));
+		return;
 	}
 
+	rc = spdk_bdev_open_ext(spdk_bdev_get_name(bdev), false, raid_bdev_examine_event_cb, NULL,
+				&ctx->desc);
+	if (rc) {
+		SPDK_ERRLOG("Failed to open bdev %s: %s\n",
+			    bdev->name, spdk_strerror(-rc));
+		goto err;
+	}
+
+	ctx->ch = spdk_bdev_get_io_channel(ctx->desc);
+	if (!ctx->ch) {
+		SPDK_ERRLOG("Failed to get io channel for bdev %s\n", bdev->name);
+		goto err;
+	}
+
+	rc = raid_bdev_load_base_bdev_superblock(ctx->desc, ctx->ch, raid_bdev_examine_load_sb_cb, ctx);
+	if (rc) {
+		SPDK_ERRLOG("Failed to read bdev %s superblock: %s\n",
+			    bdev->name, spdk_strerror(-rc));
+		goto err;
+	}
+
+	return;
+err:
+	raid_bdev_examine_ctx_free(ctx);
 	spdk_bdev_module_examine_done(&g_raid_if);
 }
 

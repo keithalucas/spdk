@@ -59,6 +59,9 @@ struct raid_base_bdev_info {
 	/* name of the bdev */
 	char			*name;
 
+	/* uuid of the bdev */
+	struct spdk_uuid	uuid;
+
 	/* pointer to base spdk bdev */
 	struct spdk_bdev	*bdev;
 

@@ -313,6 +313,99 @@ function raid0_resize_test() {
 	return 0
 }
 
+function raid_superblock_test() {
+	local raid_level=$1
+	local num_base_bdevs=$2
+	local base_bdevs_malloc=()
+	local base_bdevs_pt=()
+	local base_bdevs_pt_uuid=()
+	local raid_bdev_name="raid_bdev1"
+	local raid_bdev_uuid
+	local raid_bdev
+	local strip_size
+	local strip_size_create_arg
+
+	if [ $raid_level != "raid1" ]; then
+		strip_size=64
+		strip_size_create_arg="-z $strip_size"
+	else
+		strip_size=0
+	fi
+
+	$rootdir/test/app/bdev_svc/bdev_svc -r $rpc_server -i 0 -L bdev_raid &
+	raid_pid=$!
+	echo "Process raid pid: $raid_pid"
+	waitforlisten $raid_pid $rpc_server
+
+	# Create base bdevs
+	for ((i = 1; i <= num_base_bdevs; i++)); do
+		local bdev_malloc="malloc$i"
+		local bdev_pt="pt$i"
+		local bdev_pt_uuid="00000000-0000-0000-0000-00000000000$i"
+
+		base_bdevs_malloc+=($bdev_malloc)
+		base_bdevs_pt+=($bdev_pt)
+		base_bdevs_pt_uuid+=($bdev_pt_uuid)
+
+		$rpc_py bdev_malloc_create 32 512 -b $bdev_malloc
+		$rpc_py bdev_passthru_create -b $bdev_malloc -p $bdev_pt -u $bdev_pt_uuid
+	done
+
+	# Create RAID bdev with superblock
+	$rpc_py bdev_raid_create $strip_size_create_arg -r $raid_level -b "${base_bdevs_pt[*]}" -n $raid_bdev_name -s
+	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size; then
+		return 1
+	fi
+
+	# Get RAID bdev's UUID
+	raid_bdev_uuid=$($rpc_py bdev_get_bdevs -b $raid_bdev_name | jq -r '.[] | .uuid | select(.)')
+	if [ -z "$raid_bdev_uuid" ]; then
+		return 1
+	fi
+
+	# Stop the RAID bdev
+	$rpc_py bdev_raid_delete $raid_bdev_name
+	raid_bdev=$($rpc_py bdev_raid_get_bdevs all | jq -r '.[]')
+	if [ -n "$raid_bdev" ]; then
+		return 1
+	fi
+
+	# Delete the passthru bdevs
+	for i in "${base_bdevs_pt[@]}"; do
+		$rpc_py bdev_passthru_delete $i
+	done
+	if [ "$($rpc_py bdev_get_bdevs | jq -r '[.[] | select(.product_name == "passthru")] | any')" == "true" ]; then
+		return 1
+	fi
+
+	# Re-add first base bdev
+	$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[0]} -p ${base_bdevs_pt[0]} -u ${base_bdevs_pt_uuid[0]}
+
+	# Check if the RAID bdev was assembled from superblock
+	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size; then
+		return 1
+	fi
+
+	# Re-add remaining base bdevs
+	for ((i = 1; i < num_base_bdevs; i++)); do
+		$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[$i]} -p ${base_bdevs_pt[$i]} -u ${base_bdevs_pt_uuid[$i]}
+	done
+
+	# Check if the RAID bdev is in online state
+	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size; then
+		return 1
+	fi
+
+	# Check if the RAID bdev has the same UUID as when first created
+	if [ "$($rpc_py bdev_get_bdevs -b $raid_bdev_name | jq -r '.[] | .uuid')" != "$raid_bdev_uuid" ]; then
+		return 1
+	fi
+
+	killprocess $raid_pid
+
+	return 0
+}
+
 trap 'on_error_exit;' ERR
 
 raid_function_test raid0
@@ -322,12 +415,14 @@ raid0_resize_test
 for n in {2..4}; do
 	for level in raid0 concat raid1; do
 		raid_state_function_test $level $n
+		raid_superblock_test $level $n
 	done
 done
 
 if [ "$CONFIG_RAID5F" == y ]; then
 	for n in {3..4}; do
 		raid_state_function_test raid5f $n
+		raid_superblock_test raid5f $n
 	done
 fi
 

@@ -9802,6 +9802,7 @@ Example response:
   "result": [
     {
       "name": "RaidBdev0",
+      "uuid": "a0bf80ba-96c1-4a81-a008-ad2d1b4b814c",
       "strip_size_kb": 128,
       "state": "online",
       "raid_level": "raid0",
@@ -9814,6 +9815,7 @@ Example response:
     },
     {
       "name": "RaidBdev1",
+      "uuid": "f7cb71ed-2d0e-4240-979e-27b0b7735f36",
       "strip_size_kb": 128,
       "state": "configuring",
       "raid_level": "raid0",
