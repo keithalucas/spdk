@@ -125,7 +125,20 @@ DEFINE_STUB(spdk_bdev_get_dif_type, enum spdk_dif_type, (const struct spdk_bdev 
 	    SPDK_DIF_DISABLE);
 DEFINE_STUB(spdk_bdev_is_dif_head_of_md, bool, (const struct spdk_bdev *bdev), false);
 DEFINE_STUB(spdk_bdev_notify_blockcnt_change, int, (struct spdk_bdev *bdev, uint64_t size), 0);
+DEFINE_STUB(spdk_bdev_first, struct spdk_bdev *, (void), NULL);
+DEFINE_STUB(spdk_bdev_next, struct spdk_bdev *, (struct spdk_bdev *prev), NULL);
 DEFINE_STUB_V(raid_bdev_sb_update_crc, (struct raid_bdev_superblock *sb));
+
+int
+raid_bdev_load_base_bdev_superblock(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+				    raid_bdev_load_sb_cb cb, void *cb_ctx)
+{
+	if (cb) {
+		cb(NULL, -EINVAL, cb_ctx);
+	}
+
+	return 0;
+}
 
 int
 raid_bdev_save_base_bdev_superblock(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
