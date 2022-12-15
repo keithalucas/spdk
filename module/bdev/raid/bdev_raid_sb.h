@@ -86,8 +86,11 @@ struct raid_bdev_superblock {
 };
 SPDK_STATIC_ASSERT(sizeof(struct raid_bdev_superblock) == 192, "incorrect size");
 
+typedef void (*raid_bdev_load_sb_cb)(const struct raid_bdev_superblock *sb, int status, void *ctx);
 typedef void (*raid_bdev_save_sb_cb)(int status, void *ctx);
 
+int raid_bdev_load_base_bdev_superblock(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+					raid_bdev_load_sb_cb cb, void *cb_ctx);
 int raid_bdev_save_base_bdev_superblock(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 					const struct raid_bdev_superblock *sb, raid_bdev_save_sb_cb cb, void *cb_ctx);
 void raid_bdev_sb_update_crc(struct raid_bdev_superblock *sb);
