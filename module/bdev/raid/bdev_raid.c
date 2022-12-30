@@ -640,6 +640,8 @@ raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ct
 	spdk_json_write_named_bool(w, "superblock", raid_bdev->sb != NULL);
 	spdk_json_write_named_uint32(w, "num_base_bdevs", raid_bdev->num_base_bdevs);
 	spdk_json_write_named_uint32(w, "num_base_bdevs_discovered", raid_bdev->num_base_bdevs_discovered);
+	spdk_json_write_named_uint32(w, "num_base_bdevs_operational",
+				     raid_bdev->num_base_bdevs_operational);
 	spdk_json_write_name(w, "base_bdevs_list");
 	spdk_json_write_array_begin(w);
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
@@ -1132,6 +1134,8 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		return rc;
 	}
 
+	raid_bdev->num_base_bdevs_operational = num_base_bdevs;
+
 	if (superblock) {
 		spdk_uuid_generate(&raid_bdev->bdev.uuid);
 	}
@@ -1159,6 +1163,10 @@ raid_bdev_configure_md(struct raid_bdev *raid_bdev)
 
 	for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
 		base_bdev = raid_bdev->base_bdev_info[i].bdev;
+
+		if (base_bdev == NULL) {
+			continue;
+		}
 
 		if (i == 0) {
 			raid_bdev->bdev.md_len = spdk_bdev_get_md_size(base_bdev);
@@ -1340,10 +1348,12 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 	int rc = 0;
 
 	assert(raid_bdev->state == RAID_BDEV_STATE_CONFIGURING);
-	assert(raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs);
+	assert(raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs_operational);
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
-		assert(base_info->bdev != NULL);
+		if (base_info->bdev == NULL) {
+			continue;
+		}
 		/* Check blocklen for all base bdevs that it should be same */
 		if (blocklen == 0) {
 			blocklen = base_info->bdev->blocklen;
@@ -1729,7 +1739,7 @@ raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 			/* There is no base bdev for this raid, so free the raid device. */
 			raid_bdev_cleanup_and_free(raid_bdev);
 		}
-	} else if (raid_bdev->num_base_bdevs_discovered == raid_bdev->min_base_bdevs_operational) {
+	} else if (raid_bdev->num_base_bdevs_operational-- == raid_bdev->min_base_bdevs_operational) {
 		raid_bdev_deconfigure(raid_bdev, NULL, NULL);
 	} else {
 		return raid_bdev_suspend(raid_bdev, raid_bdev_remove_base_bdev_on_suspended, base_info);
@@ -1868,8 +1878,10 @@ raid_bdev_configure_base_bdev_cont(struct raid_base_bdev_info *base_info)
 
 	raid_bdev->num_base_bdevs_discovered++;
 	assert(raid_bdev->num_base_bdevs_discovered <= raid_bdev->num_base_bdevs);
+	assert(raid_bdev->num_base_bdevs_operational <= raid_bdev->num_base_bdevs);
+	assert(raid_bdev->num_base_bdevs_operational >= raid_bdev->min_base_bdevs_operational);
 
-	if (raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs) {
+	if (raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs_operational) {
 		rc = raid_bdev_configure(raid_bdev);
 		if (rc != 0) {
 			SPDK_ERRLOG("Failed to configure raid bdev: %s\n", spdk_strerror(-rc));
@@ -2037,8 +2049,6 @@ _raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name,
 	struct raid_base_bdev_info *base_info;
 	int rc;
 
-	assert(name != NULL || uuid != NULL);
-
 	if (slot >= raid_bdev->num_base_bdevs) {
 		return -EINVAL;
 	}
@@ -2074,6 +2084,10 @@ _raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name,
 	base_info->data_offset = data_offset;
 	base_info->data_size = data_size;
 
+	if (name == NULL && uuid == NULL) {
+		return 0;
+	}
+
 	rc = raid_bdev_configure_base_bdev(base_info);
 	if (rc != 0) {
 		if (rc != -ENODEV) {
@@ -2101,6 +2115,8 @@ _raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name,
 int
 raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t slot)
 {
+	assert(name != NULL);
+
 	return _raid_bdev_add_base_device(raid_bdev, name, NULL, slot, 0, 0);
 }
 
@@ -2109,8 +2125,15 @@ raid_bdev_add_base_device_from_sb(struct raid_bdev *raid_bdev,
 				  const struct raid_bdev_sb_base_bdev *sb_base_bdev)
 {
 	int rc;
+	const struct spdk_uuid *uuid;
 
-	rc = _raid_bdev_add_base_device(raid_bdev, NULL, &sb_base_bdev->uuid, sb_base_bdev->slot,
+	if (sb_base_bdev->state == RAID_SB_BASE_BDEV_CONFIGURED) {
+		uuid = &sb_base_bdev->uuid;
+	} else {
+		uuid = NULL;
+	}
+
+	rc = _raid_bdev_add_base_device(raid_bdev, NULL, uuid, sb_base_bdev->slot,
 					sb_base_bdev->data_offset, sb_base_bdev->data_size);
 
 	if (rc == -ENODEV) {
@@ -2139,13 +2162,15 @@ raid_bdev_create_from_sb(const struct raid_bdev_superblock *sb)
 	memcpy(raid_bdev->sb, sb, sb->length);
 
 	for (i = 0; i < sb->base_bdevs_size; i++) {
-		const struct raid_bdev_sb_base_bdev *sb_base_bdev = &sb->base_bdevs[i];
+		if (sb->base_bdevs[i].state == RAID_SB_BASE_BDEV_CONFIGURED) {
+			raid_bdev->num_base_bdevs_operational++;
+		}
+	}
 
-		if (sb_base_bdev->state == RAID_SB_BASE_BDEV_CONFIGURED) {
-			rc = raid_bdev_add_base_device_from_sb(raid_bdev, sb_base_bdev);
-			if (rc != 0) {
-				goto err;
-			}
+	for (i = 0; i < sb->base_bdevs_size; i++) {
+		rc = raid_bdev_add_base_device_from_sb(raid_bdev, &sb->base_bdevs[i]);
+		if (rc != 0) {
+			goto err;
 		}
 	}
 

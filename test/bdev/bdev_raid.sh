@@ -124,6 +124,7 @@ function verify_raid_bdev_state() (
 	local expected_state=$2
 	local raid_level=$3
 	local strip_size=$4
+	local num_base_bdevs_operational=$5
 	local raid_bdev
 	local raid_bdev_info
 	local num_base_bdevs
@@ -173,6 +174,12 @@ function verify_raid_bdev_state() (
 		echo "incorrect num_base_bdevs_discovered: $tmp, expected: $num_base_bdevs_discovered"
 		return 1
 	fi
+
+	tmp=$(echo $raid_bdev_info | jq -r '.num_base_bdevs_operational')
+	if [ "$num_base_bdevs_operational" != "$tmp" ]; then
+		echo "incorrect num_base_bdevs_operational $tmp, expected: $num_base_bdevs_operational"
+		return 1
+	fi
 )
 
 function has_redundancy() {
@@ -206,7 +213,7 @@ function raid_state_function_test() {
 	# Step1: create a RAID bdev with no base bdevs
 	# Expect state: CONFIGURING
 	$rpc_py bdev_raid_create $strip_size_create_arg -r $raid_level -b "${base_bdevs[*]}" -n $raid_bdev_name
-	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $num_base_bdevs; then
 		return 1
 	fi
 	$rpc_py bdev_raid_delete $raid_bdev_name
@@ -216,7 +223,7 @@ function raid_state_function_test() {
 	$rpc_py bdev_raid_create $strip_size_create_arg -r $raid_level -b "${base_bdevs[*]}" -n $raid_bdev_name
 	$rpc_py bdev_malloc_create 32 512 -b ${base_bdevs[0]}
 	waitforbdev ${base_bdevs[0]}
-	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $num_base_bdevs; then
 		return 1
 	fi
 	$rpc_py bdev_raid_delete $raid_bdev_name
@@ -225,13 +232,13 @@ function raid_state_function_test() {
 	# Expect state: ONLINE
 	$rpc_py bdev_raid_create $strip_size_create_arg -r $raid_level -b "${base_bdevs[*]}" -n $raid_bdev_name
 	for ((i = 1; i < num_base_bdevs; i++)); do
-		if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size; then
+		if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $num_base_bdevs; then
 			return 1
 		fi
 		$rpc_py bdev_malloc_create 32 512 -b ${base_bdevs[$i]}
 		waitforbdev ${base_bdevs[$i]}
 	done
-	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size $num_base_bdevs; then
 		return 1
 	fi
 
@@ -243,7 +250,7 @@ function raid_state_function_test() {
 	else
 		expected_state="online"
 	fi
-	if ! verify_raid_bdev_state $raid_bdev_name $expected_state $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name $expected_state $raid_level $strip_size $((num_base_bdevs - 1)); then
 		return 1
 	fi
 
@@ -353,7 +360,7 @@ function raid_superblock_test() {
 
 	# Create RAID bdev with superblock
 	$rpc_py bdev_raid_create $strip_size_create_arg -r $raid_level -b "${base_bdevs_pt[*]}" -n $raid_bdev_name -s
-	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size $num_base_bdevs; then
 		return 1
 	fi
 
@@ -381,7 +388,7 @@ function raid_superblock_test() {
 	# Try to create new RAID bdev from malloc bdevs
 	# Should not reach online state due to superblock still present on base bdevs
 	$rpc_py bdev_raid_create $strip_size_create_arg -r $raid_level -b "${base_bdevs_malloc[*]}" -n $raid_bdev_name
-	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $num_base_bdevs; then
 		return 1
 	fi
 
@@ -396,7 +403,7 @@ function raid_superblock_test() {
 	$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[0]} -p ${base_bdevs_pt[0]} -u ${base_bdevs_pt_uuid[0]}
 
 	# Check if the RAID bdev was assembled from superblock
-	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $num_base_bdevs; then
 		return 1
 	fi
 
@@ -406,13 +413,102 @@ function raid_superblock_test() {
 	done
 
 	# Check if the RAID bdev is in online state
-	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size; then
+	if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size $num_base_bdevs; then
 		return 1
 	fi
 
 	# Check if the RAID bdev has the same UUID as when first created
 	if [ "$($rpc_py bdev_get_bdevs -b $raid_bdev_name | jq -r '.[] | .uuid')" != "$raid_bdev_uuid" ]; then
 		return 1
+	fi
+
+	if has_redundancy $raid_level; then
+		# Delete one base bdev
+		$rpc_py bdev_passthru_delete ${base_bdevs_pt[0]}
+
+		# Check if the RAID bdev is in online state (degraded)
+		if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size $((num_base_bdevs - 1)); then
+			return 1
+		fi
+
+		# Stop the RAID bdev
+		$rpc_py bdev_raid_delete $raid_bdev_name
+		raid_bdev=$($rpc_py bdev_raid_get_bdevs all | jq -r '.[]')
+		if [ -n "$raid_bdev" ]; then
+			return 1
+		fi
+
+		# Delete remaining base bdevs
+		for ((i = 1; i < num_base_bdevs; i++)); do
+			$rpc_py bdev_passthru_delete ${base_bdevs_pt[$i]}
+		done
+
+		# Re-add base bdevs from the second up to (not including) the last one
+		for ((i = 1; i < num_base_bdevs - 1; i++)); do
+			$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[$i]} -p ${base_bdevs_pt[$i]} -u ${base_bdevs_pt_uuid[$i]}
+
+			# Check if the RAID bdev is in configuring state
+			if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $((num_base_bdevs - 1)); then
+				return 1
+			fi
+		done
+
+		# Re-add the last base bdev
+		i=$((num_base_bdevs - 1))
+		$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[$i]} -p ${base_bdevs_pt[$i]} -u ${base_bdevs_pt_uuid[$i]}
+
+		# Check if the RAID bdev is in online state (degraded)
+		if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size $((num_base_bdevs - 1)); then
+			return 1
+		fi
+
+		if [ $num_base_bdevs -gt 2 ]; then
+			# Stop the RAID bdev
+			$rpc_py bdev_raid_delete $raid_bdev_name
+			raid_bdev=$($rpc_py bdev_raid_get_bdevs all | jq -r '.[]')
+			if [ -n "$raid_bdev" ]; then
+				return 1
+			fi
+
+			# Delete remaining base bdevs
+			for ((i = 1; i < num_base_bdevs; i++)); do
+				$rpc_py bdev_passthru_delete ${base_bdevs_pt[$i]}
+			done
+
+			# Re-add first base bdev
+			# This is the "failed" device and contains the "old" version of the superblock
+			$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[0]} -p ${base_bdevs_pt[0]} -u ${base_bdevs_pt_uuid[0]}
+
+			# Check if the RAID bdev is in configuring state
+			if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $num_base_bdevs; then
+				return 1
+			fi
+
+			# Re-add the last base bdev
+			i=$((num_base_bdevs - 1))
+			$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[$i]} -p ${base_bdevs_pt[$i]} -u ${base_bdevs_pt_uuid[$i]}
+
+			# Check if the RAID bdev is in configuring state
+			# This should use the newer superblock version and have n-1 online base bdevs
+			if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size $((num_base_bdevs - 1)); then
+				return 1
+			fi
+
+			# Re-add remaining base bdevs
+			for ((i = 1; i < num_base_bdevs - 1; i++)); do
+				$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[$i]} -p ${base_bdevs_pt[$i]} -u ${base_bdevs_pt_uuid[$i]}
+			done
+
+			# Check if the RAID bdev is in online state (degraded)
+			if ! verify_raid_bdev_state $raid_bdev_name "online" $raid_level $strip_size $((num_base_bdevs - 1)); then
+				return 1
+			fi
+		fi
+
+		# Check if the RAID bdev has the same UUID as when first created
+		if [ "$($rpc_py bdev_get_bdevs -b $raid_bdev_name | jq -r '.[] | .uuid')" != "$raid_bdev_uuid" ]; then
+			return 1
+		fi
 	fi
 
 	killprocess $raid_pid
