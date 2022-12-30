@@ -153,6 +153,9 @@ struct raid_bdev {
 	/* number of base bdevs discovered */
 	uint8_t				num_base_bdevs_discovered;
 
+	/* number of operational base bdevs */
+	uint8_t				num_base_bdevs_operational;
+
 	/* minimum number of viable base bdevs that are required by array to operate */
 	uint8_t				min_base_bdevs_operational;
 
