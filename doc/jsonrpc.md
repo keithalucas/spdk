@@ -10045,6 +10045,7 @@ Example response:
       "raid_level": "raid0",
       "num_base_bdevs": 2,
       "num_base_bdevs_discovered": 2,
+      "num_base_bdevs_operational": 2,
       "base_bdevs_list": [
         {
           "name": "malloc0",
@@ -10070,6 +10071,7 @@ Example response:
       "raid_level": "raid0",
       "num_base_bdevs": 2,
       "num_base_bdevs_discovered": 1,
+      "num_base_bdevs_operational": 2,
       "base_bdevs_list": [
         {
           "name": "malloc2",

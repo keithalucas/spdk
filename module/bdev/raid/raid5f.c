@@ -1089,7 +1089,9 @@ raid5f_start(struct raid_bdev *raid_bdev)
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 		min_blockcnt = spdk_min(min_blockcnt, base_info->data_size);
-		alignment = spdk_max(alignment, spdk_bdev_get_buf_align(base_info->bdev));
+		if (base_info->bdev) {
+			alignment = spdk_max(alignment, spdk_bdev_get_buf_align(base_info->bdev));
+		}
 	}
 
 	base_bdev_data_size = (min_blockcnt / raid_bdev->strip_size) * raid_bdev->strip_size;
