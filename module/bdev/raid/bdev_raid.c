@@ -225,17 +225,21 @@ raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
-	if (base_info->bdev != NULL) {
+	if (base_info->is_configured) {
 		assert(base_info->desc);
 		assert(raid_bdev->num_base_bdevs_discovered);
 		raid_bdev->num_base_bdevs_discovered--;
-		spdk_bdev_module_release_bdev(base_info->bdev);
-		base_info->bdev = NULL;
+		base_info->is_configured = false;
 	}
 
 	if (base_info->app_thread_ch != NULL) {
 		spdk_put_io_channel(base_info->app_thread_ch);
 		base_info->app_thread_ch = NULL;
+	}
+
+	if (base_info->bdev != NULL) {
+		spdk_bdev_module_release_bdev(base_info->bdev);
+		base_info->bdev = NULL;
 	}
 
 	if (base_info->desc != NULL) {
@@ -1812,6 +1816,48 @@ raid_bdev_delete(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn, void 
 	}
 }
 
+static void
+raid_bdev_configure_base_bdev_cont(struct raid_base_bdev_info *base_info)
+{
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+	int rc;
+
+	base_info->is_configured = true;
+
+	raid_bdev->num_base_bdevs_discovered++;
+	assert(raid_bdev->num_base_bdevs_discovered <= raid_bdev->num_base_bdevs);
+
+	if (raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs) {
+		rc = raid_bdev_configure(raid_bdev);
+		if (rc != 0) {
+			SPDK_ERRLOG("Failed to configure raid bdev: %s\n", spdk_strerror(-rc));
+		}
+	}
+}
+
+static void
+raid_bdev_configure_base_bdev_load_sb_cb(const struct raid_bdev_superblock *sb, int status,
+		void *ctx)
+{
+	struct raid_base_bdev_info *base_info = ctx;
+
+	switch (status) {
+	case 0:
+		/* valid superblock found */
+		SPDK_ERRLOG("Existing raid superblock found on bdev %s\n", base_info->name);
+		raid_bdev_free_base_bdev_resource(base_info);
+		break;
+	case -EINVAL:
+		/* no valid superblock */
+		raid_bdev_configure_base_bdev_cont(base_info);
+		break;
+	default:
+		SPDK_ERRLOG("Failed to examine bdev %s: %s\n",
+			    base_info->name, spdk_strerror(-status));
+		break;
+	}
+}
+
 static int
 raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 {
@@ -1914,27 +1960,26 @@ raid_bdev_configure_base_bdev(struct raid_base_bdev_info *base_info)
 		goto out;
 	}
 
-	if (base_info->data_size == 0) {
-		base_info->data_size = bdev->blockcnt - base_info->data_offset;
-	} else if (base_info->data_offset + base_info->data_size > bdev->blockcnt) {
-		SPDK_ERRLOG("Data offset and size exceeds base bdev capacity %lu on bdev '%s'\n",
-			    bdev->blockcnt, base_info->name);
-		rc = -EINVAL;
-		goto out;
-	}
-
 	base_info->bdev = bdev;
 	base_info->desc = desc;
 	base_info->blockcnt = bdev->blockcnt;
 
-	raid_bdev->num_base_bdevs_discovered++;
-	assert(raid_bdev->num_base_bdevs_discovered <= raid_bdev->num_base_bdevs);
+	if (base_info->data_size == 0) {
+		base_info->data_size = bdev->blockcnt - base_info->data_offset;
 
-	if (raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs) {
-		rc = raid_bdev_configure(raid_bdev);
-		if (rc != 0) {
-			SPDK_ERRLOG("Failed to configure raid bdev: %s\n", spdk_strerror(-rc));
+		/* check for existing superblock when using a new bdev */
+		rc = raid_bdev_load_base_bdev_superblock(desc, base_info->app_thread_ch,
+				raid_bdev_configure_base_bdev_load_sb_cb, base_info);
+		if (rc) {
+			SPDK_ERRLOG("Failed to read bdev %s superblock: %s\n",
+				    bdev->name, spdk_strerror(-rc));
 		}
+	} else if (base_info->data_offset + base_info->data_size > bdev->blockcnt) {
+		SPDK_ERRLOG("Data offset and size exceeds base bdev capacity %lu on bdev '%s'\n",
+			    bdev->blockcnt, base_info->name);
+		rc = -EINVAL;
+	} else {
+		raid_bdev_configure_base_bdev_cont(base_info);
 	}
 out:
 	if (rc != 0) {
