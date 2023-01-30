@@ -378,6 +378,20 @@ function raid_superblock_test() {
 		return 1
 	fi
 
+	# Try to create new RAID bdev from malloc bdevs
+	# Should not reach online state due to superblock still present on base bdevs
+	$rpc_py bdev_raid_create $strip_size_create_arg -r $raid_level -b "${base_bdevs_malloc[*]}" -n $raid_bdev_name
+	if ! verify_raid_bdev_state $raid_bdev_name "configuring" $raid_level $strip_size; then
+		return 1
+	fi
+
+	# Stop the RAID bdev
+	$rpc_py bdev_raid_delete $raid_bdev_name
+	raid_bdev=$($rpc_py bdev_raid_get_bdevs all | jq -r '.[]')
+	if [ -n "$raid_bdev" ]; then
+		return 1
+	fi
+
 	# Re-add first base bdev
 	$rpc_py bdev_passthru_create -b ${base_bdevs_malloc[0]} -p ${base_bdevs_pt[0]} -u ${base_bdevs_pt_uuid[0]}
 
