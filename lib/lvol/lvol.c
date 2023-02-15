@@ -2208,3 +2208,78 @@ spdk_lvol_is_degraded(const struct spdk_lvol *lvol)
 	}
 	return spdk_blob_is_degraded(blob);
 }
+
+static void
+lvol_shallow_copy_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_req *req = cb_arg;
+
+	spdk_bs_free_io_channel(req->channel);
+
+	if (lvolerrno < 0) {
+		SPDK_ERRLOG("Could not make a shallow copy of lvol\n");
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+void
+spdk_lvol_shallow_copy(struct spdk_lvol *lvol, struct spdk_bs_dev *ext_dev,
+		       spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_req *req;
+	spdk_blob_id blob_id;
+	uint64_t lvol_total_size;
+
+	assert(cb_fn != NULL);
+
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		cb_fn(cb_arg, -ENODEV);
+		return;
+	}
+
+	if (ext_dev == NULL) {
+		SPDK_ERRLOG("External device does not exist\n");
+		cb_fn(cb_arg, -ENODEV);
+		return;
+	}
+
+	if (!spdk_blob_is_read_only(lvol->blob)) {
+		SPDK_ERRLOG("lvol must be read only\n");
+		cb_fn(cb_arg, -EPERM);
+		return;
+	}
+
+	lvol_total_size = spdk_blob_get_num_clusters(lvol->blob) *
+			  spdk_bs_get_cluster_size(lvol->lvol_store->blobstore);
+
+	if (lvol_total_size > ext_dev->blockcnt * ext_dev->blocklen) {
+		SPDK_ERRLOG("bdev must have at least lvol size\n");
+		cb_fn(cb_arg, -EFBIG);
+		return;
+	}
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("Cannot alloc memory for lvol request pointer\n");
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+	req->channel = spdk_bs_alloc_io_channel(lvol->lvol_store->blobstore);
+	if (req->channel == NULL) {
+		SPDK_ERRLOG("Cannot alloc io channel for lvol shallow copy request\n");
+		free(req);
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	blob_id = spdk_blob_get_id(lvol->blob);
+
+	spdk_bs_blob_shallow_copy(lvol->lvol_store->blobstore, req->channel, blob_id, ext_dev,
+				  lvol_shallow_copy_cb, req);
+}
