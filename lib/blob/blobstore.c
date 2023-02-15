@@ -40,6 +40,8 @@ static int blob_remove_xattr(struct spdk_blob *blob, const char *name, bool inte
 static void blob_write_extent_page(struct spdk_blob *blob, uint32_t extent, uint64_t cluster_num,
 				   struct spdk_blob_md_page *page, spdk_blob_op_complete cb_fn, void *cb_arg);
 
+static void bs_shallow_copy_cluster_find_next(void *cb_arg, int bserrno);
+
 /*
  * External snapshots require a channel per thread per esnap bdev.  The tree
  * is populated lazily as blob IOs are handled by the back_bs_dev. When this
@@ -302,6 +304,8 @@ blob_alloc(struct spdk_blob_store *bs, spdk_blob_id id)
 	blob->parent_id = SPDK_BLOBID_INVALID;
 
 	blob->state = SPDK_BLOB_STATE_DIRTY;
+	blob->u.shallow_copy.copied_clusters_number = 0;
+	blob->u.shallow_copy.num_clusters_to_copy = 0;
 	blob->extent_rle_found = false;
 	blob->extent_table_found = false;
 	blob->active.num_pages = 1;
@@ -5911,6 +5915,26 @@ spdk_blob_get_next_unallocated_io_unit(struct spdk_blob *blob, uint64_t offset)
 	return blob_find_io_unit(blob, offset, false);
 }
 
+uint64_t
+spdk_blob_get_shallow_copy_copied_clusters(struct spdk_blob *blob)
+{
+	assert(blob != NULL);
+
+	if (blob->u.shallow_copy.num_clusters_to_copy > 0) {
+		return blob->u.shallow_copy.copied_clusters_number;
+	} else {
+		return UINT64_MAX;
+	}
+}
+
+uint64_t
+spdk_blob_get_shallow_copy_total_clusters(struct spdk_blob *blob)
+{
+	assert(blob != NULL);
+
+	return blob->u.shallow_copy.num_clusters_to_copy;
+}
+
 /* START spdk_bs_create_blob */
 
 static void
@@ -6949,6 +6973,232 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel 
 	bs_inflate_blob(bs, channel, blobid, false, cb_fn, cb_arg);
 }
 /* END spdk_bs_inflate_blob */
+
+/* START spdk_bs_blob_shallow_copy */
+
+struct shallow_copy_ctx {
+	struct spdk_bs_cpl      cpl;
+	int bserrno;
+
+	/* Blob source for copy */
+	struct spdk_blob *blob;
+	struct spdk_io_channel *blob_channel;
+
+	/* Destination device for copy */
+	struct spdk_bs_dev *ext_dev;
+	struct spdk_io_channel *ext_channel;
+
+	/* Current cluster for copy operation */
+	uint64_t cluster;
+
+	/* Buffer for blob reading */
+	uint8_t *read_buff;
+
+	/* Struct for external device writing */
+	struct spdk_bs_dev_cb_args ext_args;
+};
+
+static void
+bs_shallow_copy_cleanup_finish(void *cb_arg, int bserrno)
+{
+	struct shallow_copy_ctx *ctx = cb_arg;
+	struct spdk_bs_cpl *cpl = &ctx->cpl;
+
+	if (bserrno != 0) {
+		if (ctx->bserrno == 0) {
+			SPDK_ERRLOG("Shallow copy cleanup error %d\n", bserrno);
+			ctx->bserrno = bserrno;
+		}
+	}
+
+	ctx->ext_dev->destroy_channel(ctx->ext_dev, ctx->ext_channel);
+	spdk_free(ctx->read_buff);
+
+	cpl->u.blob_basic.cb_fn(cpl->u.blob_basic.cb_arg, ctx->bserrno);
+
+	free(ctx);
+}
+
+static void
+bs_shallow_copy_bdev_write_cpl(struct spdk_io_channel *channel, void *cb_arg, int bserrno)
+{
+	struct shallow_copy_ctx *ctx = (struct shallow_copy_ctx *)cb_arg;
+	struct spdk_blob *_blob = ctx->blob;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("Shallow copy ext dev write error %d\n", bserrno);
+		ctx->bserrno = bserrno;
+		_blob->locked_operation_in_progress = false;
+		_blob->u.shallow_copy.copied_clusters_number = 0;
+		_blob->u.shallow_copy.num_clusters_to_copy = 0;
+		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
+		return;
+	}
+
+	ctx->cluster++;
+	_blob->u.shallow_copy.copied_clusters_number++;
+
+	bs_shallow_copy_cluster_find_next(ctx, 0);
+}
+
+static void
+bs_shallow_copy_blob_read_cpl(void *cb_arg, int bserrno)
+{
+	struct shallow_copy_ctx *ctx = (struct shallow_copy_ctx *)cb_arg;
+	struct spdk_bs_dev *ext_dev = ctx->ext_dev;
+	struct spdk_blob *_blob = ctx->blob;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("Shallow copy blob read error %d\n", bserrno);
+		ctx->bserrno = bserrno;
+		_blob->locked_operation_in_progress = false;
+		_blob->u.shallow_copy.copied_clusters_number = 0;
+		_blob->u.shallow_copy.num_clusters_to_copy = 0;
+		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
+		return;
+	}
+
+	ctx->ext_args.channel = ctx->ext_channel;
+	ctx->ext_args.cb_fn = bs_shallow_copy_bdev_write_cpl;
+	ctx->ext_args.cb_arg = ctx;
+
+	ext_dev->write(ext_dev, ctx->ext_channel, ctx->read_buff,
+		       bs_cluster_to_lba(_blob->bs, ctx->cluster),
+		       bs_dev_byte_to_lba(_blob->bs->dev, _blob->bs->cluster_sz),
+		       &ctx->ext_args);
+}
+
+static void
+bs_shallow_copy_cluster_find_next(void *cb_arg, int bserrno)
+{
+	struct shallow_copy_ctx *ctx = (struct shallow_copy_ctx *)cb_arg;
+	struct spdk_blob *_blob = ctx->blob;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("Shallow copy bdev write error %d\n", bserrno);
+		ctx->bserrno = bserrno;
+		_blob->locked_operation_in_progress = false;
+		_blob->u.shallow_copy.copied_clusters_number = 0;
+		_blob->u.shallow_copy.num_clusters_to_copy = 0;
+		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
+		return;
+	}
+
+	while (ctx->cluster < _blob->active.num_clusters) {
+		if (_blob->active.clusters[ctx->cluster] != 0) {
+			break;
+		}
+
+		ctx->cluster++;
+	}
+
+	if (ctx->cluster < _blob->active.num_clusters) {
+		blob_request_submit_op_single(ctx->blob_channel, _blob, ctx->read_buff,
+					      bs_cluster_to_lba(_blob->bs, ctx->cluster),
+					      bs_dev_byte_to_lba(_blob->bs->dev, _blob->bs->cluster_sz),
+					      bs_shallow_copy_blob_read_cpl, ctx, SPDK_BLOB_READ);
+	} else {
+		_blob->u.shallow_copy.copied_clusters_number = 0;
+		_blob->u.shallow_copy.num_clusters_to_copy = 0;
+		_blob->locked_operation_in_progress = false;
+		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
+	}
+}
+
+static void
+bs_shallow_copy_blob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int bserrno)
+{
+	struct shallow_copy_ctx *ctx = (struct shallow_copy_ctx *)cb_arg;
+	struct spdk_bs_dev *ext_dev = ctx->ext_dev;
+	uint32_t blob_block_size;
+	uint64_t blob_total_size;
+	uint64_t i;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("Shallow copy blob open error %d\n", bserrno);
+		ctx->bserrno = bserrno;
+		bs_shallow_copy_cleanup_finish(ctx, bserrno);
+		return;
+	}
+
+	blob_block_size = _blob->bs->dev->blocklen;
+	blob_total_size = spdk_blob_get_num_clusters(_blob) * spdk_bs_get_cluster_size(_blob->bs);
+
+	if (blob_total_size > ext_dev->blockcnt * ext_dev->blocklen) {
+		SPDK_ERRLOG("external device must have at least blob size\n");
+		ctx->bserrno = -EINVAL;
+		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
+		return;
+	}
+
+	if (blob_block_size % ext_dev->blocklen != 0) {
+		SPDK_ERRLOG("external device block size is not compatible with blobstore block size\n");
+		ctx->bserrno = -EINVAL;
+		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
+		return;
+	}
+
+	ctx->blob = _blob;
+
+	if (_blob->locked_operation_in_progress) {
+		SPDK_DEBUGLOG(blob, "Cannot make a shallow copy of blob - another operation in progress\n");
+		ctx->bserrno = -EBUSY;
+		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
+		return;
+	}
+
+	_blob->locked_operation_in_progress = true;
+
+	for (i = 0; i < _blob->active.num_clusters; i++) {
+		if (_blob->active.clusters[i] != 0) {
+			_blob->u.shallow_copy.num_clusters_to_copy++;
+		}
+	}
+
+	ctx->cluster = 0;
+	bs_shallow_copy_cluster_find_next(ctx, 0);
+}
+
+void
+spdk_bs_blob_shallow_copy(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
+			  spdk_blob_id blobid, struct spdk_bs_dev *ext_dev,
+			  spdk_blob_op_complete cb_fn, void *cb_arg)
+{
+	struct shallow_copy_ctx *ctx;
+	struct spdk_io_channel *ext_channel;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	ctx->cpl.type = SPDK_BS_CPL_TYPE_BLOB_BASIC;
+	ctx->cpl.u.bs_basic.cb_fn = cb_fn;
+	ctx->cpl.u.bs_basic.cb_arg = cb_arg;
+	ctx->bserrno = 0;
+	ctx->blob_channel = channel;
+	ctx->read_buff = spdk_malloc(bs->cluster_sz, bs->dev->blocklen, NULL,
+				     SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
+	if (!ctx->read_buff) {
+		free(ctx);
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	ext_channel = ext_dev->create_channel(ext_dev);
+	if (!ext_channel) {
+		spdk_free(ctx->read_buff);
+		free(ctx);
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+	ctx->ext_dev = ext_dev;
+	ctx->ext_channel = ext_channel;
+
+	spdk_bs_open_blob(bs, blobid, bs_shallow_copy_blob_open_cpl, ctx);
+}
+/* END spdk_bs_blob_shallow_copy */
 
 /* START spdk_blob_resize */
 struct spdk_bs_resize_ctx {

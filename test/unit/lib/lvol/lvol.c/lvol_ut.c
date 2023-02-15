@@ -62,6 +62,7 @@ int g_resize_rc;
 int g_inflate_rc;
 int g_remove_rc;
 bool g_lvs_rename_blob_open_error = false;
+bool g_blob_read_only = false;
 struct spdk_lvol_store *g_lvol_store;
 struct spdk_lvol *g_lvol;
 spdk_blob_id g_blobid = 1;
@@ -139,7 +140,7 @@ spdk_bs_iter_first(struct spdk_blob_store *bs,
 uint64_t
 spdk_blob_get_num_clusters(struct spdk_blob *blob)
 {
-	return 0;
+	return 1;
 }
 
 void
@@ -248,6 +249,14 @@ bool
 spdk_blob_is_thin_provisioned(struct spdk_blob *blob)
 {
 	return blob->thin_provisioned;
+}
+
+void
+spdk_bs_blob_shallow_copy(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
+			  spdk_blob_id blobid, struct spdk_bs_dev *ext_dev,
+			  spdk_blob_op_complete cb_fn, void *cb_arg)
+{
+	cb_fn(cb_arg, 0);
 }
 
 DEFINE_STUB(spdk_bs_get_page_size, uint64_t, (struct spdk_blob_store *bs), BS_PAGE_SIZE);
@@ -458,6 +467,12 @@ spdk_blob_open_opts_init(struct spdk_blob_open_opts *opts, size_t opts_size)
 {
 	opts->opts_size = opts_size;
 	opts->clear_method = BLOB_CLEAR_WITH_DEFAULT;
+}
+
+bool
+spdk_blob_is_read_only(struct spdk_blob *blob)
+{
+	return g_blob_read_only;
 }
 
 void
@@ -3298,6 +3313,75 @@ lvol_get_by(void)
 	free_dev(&dev2);
 }
 
+static void
+lvol_shallow_copy(void)
+{
+	struct lvol_ut_bs_dev bs_dev;
+	struct spdk_lvs_opts opts;
+	struct spdk_bs_dev ext_dev;
+	int rc = 0;
+
+	init_dev(&bs_dev);
+
+	ext_dev.blocklen = DEV_BUFFER_BLOCKLEN;
+	ext_dev.blockcnt = BS_CLUSTER_SIZE / DEV_BUFFER_BLOCKLEN;
+
+	spdk_lvs_opts_init(&opts);
+	snprintf(opts.name, sizeof(opts.name), "lvs");
+
+	g_lvserrno = -1;
+	rc = spdk_lvs_init(&bs_dev.bs_dev, &opts, lvol_store_op_with_handle_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol_store != NULL);
+
+	spdk_lvol_create(g_lvol_store, "lvol", BS_CLUSTER_SIZE, false, LVOL_CLEAR_WITH_DEFAULT,
+			 lvol_op_with_handle_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
+
+	/* Successful shallow copy */
+	g_blob_read_only = true;
+	spdk_lvol_shallow_copy(g_lvol, &ext_dev, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+
+	/* Shallow copy with null lvol */
+	spdk_lvol_shallow_copy(NULL, &ext_dev, op_complete, NULL);
+	CU_ASSERT(g_lvserrno != 0);
+
+	/* Shallow copy with null ext_dev */
+	spdk_lvol_shallow_copy(g_lvol, NULL, op_complete, NULL);
+	CU_ASSERT(g_lvserrno != 0);
+
+	/* Shallow copy with invalid ext_dev size */
+	ext_dev.blockcnt = 1;
+	spdk_lvol_shallow_copy(g_lvol, &ext_dev, op_complete, NULL);
+	CU_ASSERT(g_lvserrno != 0);
+
+	/* Shallow copy with writable lvol  */
+	g_blob_read_only = false;
+	spdk_lvol_shallow_copy(g_lvol, &ext_dev, op_complete, NULL);
+	CU_ASSERT(g_lvserrno != 0);
+
+	spdk_lvol_close(g_lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	spdk_lvol_destroy(g_lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+
+	g_lvserrno = -1;
+	rc = spdk_lvs_unload(g_lvol_store, op_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	g_lvol_store = NULL;
+
+	free_dev(&bs_dev);
+
+	/* Make sure that all references to the io_channel was closed after
+	 * shallow copy call
+	 */
+	CU_ASSERT(g_io_channel == NULL);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3342,6 +3426,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, lvol_esnap_missing);
 	CU_ADD_TEST(suite, lvol_esnap_hotplug);
 	CU_ADD_TEST(suite, lvol_get_by);
+	CU_ADD_TEST(suite, lvol_shallow_copy);
 
 	allocate_threads(1);
 	set_thread(0);
