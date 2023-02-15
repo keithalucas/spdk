@@ -198,6 +198,20 @@ def bdev_lvol_decouple_parent(client, name):
     return client.call('bdev_lvol_decouple_parent', params)
 
 
+def bdev_lvol_shallow_copy(client, lvol_name, bdev_name):
+    """Make a shallow copy of a logical volume over an external bdev
+
+    Args:
+        lvol_name: name of the logical volume to create a copy from
+        bdev_name: name of the bdev that acts as destination for the copy
+    """
+    params = {
+        'lvol_name': lvol_name,
+        'bdev_name': bdev_name
+    }
+    return client.call('bdev_lvol_shallow_copy', params)
+
+
 def bdev_lvol_delete_lvstore(client, uuid=None, lvs_name=None):
     """Destroy a logical volume store.
 

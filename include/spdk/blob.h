@@ -676,6 +676,23 @@ void spdk_bs_inflate_blob(struct spdk_blob_store *bs, struct spdk_io_channel *ch
 void spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
 				  spdk_blob_id blobid, spdk_blob_op_complete cb_fn, void *cb_arg);
 
+/**
+ * Perform a shallow copy over an external device
+ *
+ * This call make a shallow copy of a logical volume over a device external to the blob store.
+ * Only cluster allocated to the logical volume will be written on the device.
+
+ * \param bs Blobstore
+ * \param channel IO channel used to copy the blob.
+ * \param blobid The id of the blob.
+ * \param ext_dev The device to copy on
+ * \param cb_fn Called when the operation is complete.
+ * \param cb_arg Argument passed to function cb_fn.
+ */
+void spdk_bs_blob_shallow_copy(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
+			       spdk_blob_id blobid, struct spdk_bs_dev *ext_dev,
+			       spdk_blob_op_complete cb_fn, void *cb_arg);
+
 struct spdk_blob_open_opts {
 	enum blob_clear_method  clear_method;
 

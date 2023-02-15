@@ -2022,6 +2022,16 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('name', help='lvol bdev name')
     p.set_defaults(func=bdev_lvol_delete)
 
+    def bdev_lvol_shallow_copy(args):
+        rpc.lvol.bdev_lvol_shallow_copy(args.client,
+                                        lvol_name=args.lvol_name,
+                                        bdev_name=args.bdev_name)
+
+    p = subparsers.add_parser('bdev_lvol_shallow_copy', help='Make a shallow copy of a lvol over an external bdev')
+    p.add_argument('lvol_name', help='lvol name')
+    p.add_argument('bdev_name', help='bdev name')
+    p.set_defaults(func=bdev_lvol_shallow_copy)
+
     def bdev_lvol_delete_lvstore(args):
         rpc.lvol.bdev_lvol_delete_lvstore(args.client,
                                           uuid=args.uuid,

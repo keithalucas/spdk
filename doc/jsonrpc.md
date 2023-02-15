@@ -491,6 +491,7 @@ Example response:
     "bdev_lvol_delete_lvstore",
     "bdev_lvol_rename_lvstore",
     "bdev_lvol_create_lvstore",
+    "bdev_lvol_shallow_copy",
     "bdev_daos_delete",
     "bdev_daos_create",
     "bdev_daos_resize"
@@ -9959,6 +9960,44 @@ Example request:
   "id": 1.
   "params": {
     "name": "8d87fccc-c278-49f0-9d4c-6237951aca09"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### bdev_lvol_shallow_copy {#rpc_bdev_lvol_shallow_copy}
+
+Make a shallow copy of a logical volume over a bdev external to the logical volume store.
+Only cluster allocated to the logical volume will be written on the bdev.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+lvol_name               | Required | string      | UUID or alias of the logical volume to create a copy from
+bdev_name               | Required | string      | Name of the bdev that acts as destination for the copy
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_shallow_copy",
+  "id": 1.
+  "params": {
+    "lvol_name": "8a47421a-20cf-444f-845c-d97ad0b0bd8e",
+    "bdev_name": "Nvme1n1"
   }
 }
 ~~~

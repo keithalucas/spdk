@@ -17,6 +17,7 @@ run_test "lvol_tasting" $rootdir/test/lvol/tasting.sh
 run_test "lvol_snapshot_clone" $rootdir/test/lvol/snapshot_clone.sh
 run_test "lvol_rename" $rootdir/test/lvol/rename.sh
 run_test "lvol_provisioning" $rootdir/test/lvol/thin_provisioning.sh
+run_test "lvol_external_copy" $rootdir/test/lvol/external_copy.sh
 timing_exit basic
 
 timing_exit lvol
