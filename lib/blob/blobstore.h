@@ -148,6 +148,13 @@ struct spdk_blob {
 	/* Number of data clusters retrieved from extent table,
 	 * that many have to be read from extent pages. */
 	uint64_t	remaining_clusters_in_et;
+
+	union {
+		struct {
+			uint64_t num_clusters_to_copy;
+			uint64_t cluster_copy_index;
+		} shallow_copy;
+	} u;
 };
 
 struct spdk_blob_store {

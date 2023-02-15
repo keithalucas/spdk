@@ -116,4 +116,15 @@ struct spdk_lvol *vbdev_lvol_get_from_bdev(struct spdk_bdev *bdev);
 void vbdev_lvs_grow(struct spdk_lvol_store *lvs,
 		    spdk_lvs_op_complete cb_fn, void *cb_arg);
 
+/**
+ * \brief Make a shallow copy of lvol over a bdev
+ *
+ * \param lvol Handle to lvol
+ * \param bdev_name Name of the bdev to copy on
+ * \param cb_fn Completion callback
+ * \param cb_arg Completion callback custom arguments
+ */
+void vbdev_lvol_shallow_copy(struct spdk_lvol *lvol, const char *bdev_name,
+			     spdk_lvol_op_complete cb_fn, void *cb_arg);
+
 #endif /* SPDK_VBDEV_LVOL_H */
