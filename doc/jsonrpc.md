@@ -12012,3 +12012,79 @@ Example response:
   }
 ]
 ~~~
+
+### nvmf_pause_namespace method {#rpc_nvmf_pause_namespace}
+
+Pause I/O over a NVMe-oF subsystem's namespace.
+
+#### Parameters
+
+Parameter              | Optional | Type        | Description
+---------------------- | -------- | ----------- | -----------
+nqn                    | Required | string      | Subsystem NQN.
+nsid                   | Required | number      | Namespace ID
+tgt_name               | Optional | string      | Parent NVMe-oF target name.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "nvmf_pause_namespace",
+  "params": {
+    "nqn": "nqn.2023-03.io.spdk:cnode1",
+    "nsid": 1
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### nvmf_resume_namespace method {#rpc_nvmf_resume_namespace}
+
+Resume I/O over a NVMe-oF subsystem's namespace.
+
+#### Parameters
+
+Parameter              | Optional | Type        | Description
+---------------------- | -------- | ----------- | -----------
+nqn                    | Required | string      | Subsystem NQN.
+nsid                   | Required | number      | Namespace ID
+tgt_name               | Optional | string      | Parent NVMe-oF target name.
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "nvmf_resume_namespace",
+  "params": {
+    "nqn": "nqn.2023-03.io.spdk:cnode1",
+    "nsid": 1
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~

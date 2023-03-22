@@ -161,6 +161,22 @@ nvmf_poll_group_resume_subsystem(struct spdk_nvmf_poll_group *group,
 {
 }
 
+void
+nvmf_poll_group_pause_ns(struct spdk_nvmf_poll_group *group,
+			 struct spdk_nvmf_subsystem *subsystem,
+			 uint32_t nsid,
+			 spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg)
+{
+}
+
+void
+nvmf_poll_group_resume_ns(struct spdk_nvmf_poll_group *group,
+			  struct spdk_nvmf_subsystem *subsystem,
+			  uint32_t nsid,
+			  spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg)
+{
+}
+
 int
 spdk_nvme_transport_id_parse_trtype(enum spdk_nvme_transport_type *trtype, const char *str)
 {
@@ -1762,6 +1778,99 @@ test_nvmf_subsystem_state_change(void)
 	free(tgt.subsystems);
 }
 
+static void
+test_nvmf_ns_state_change(void)
+{
+	struct spdk_nvmf_tgt tgt = {};
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_ns_opts ns_opts;
+	uint32_t nsid;
+	int rc;
+
+	/* Create subsystem */
+	tgt.max_subsystems = 1024;
+	tgt.subsystems = calloc(tgt.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
+	SPDK_CU_ASSERT_FATAL(tgt.subsystems != NULL);
+
+	subsystem = spdk_nvmf_subsystem_create(&tgt, "nqn.2023-03.io.spdk:subsystem1",
+					       SPDK_NVMF_SUBTYPE_NVME, 0);
+	SPDK_CU_ASSERT_FATAL(subsystem != NULL);
+
+	spdk_io_device_register(&tgt,
+				nvmf_tgt_create_poll_group,
+				nvmf_tgt_destroy_poll_group,
+				sizeof(struct spdk_nvmf_poll_group),
+				NULL);
+
+	/* Add namespace to subsystem and start subsystem */
+	spdk_nvmf_ns_opts_get_defaults(&ns_opts, sizeof(ns_opts));
+	nsid = spdk_nvmf_subsystem_add_ns_ext(subsystem, "bdev2", &ns_opts, sizeof(ns_opts), NULL);
+	CU_ASSERT(nsid == 1);
+	SPDK_CU_ASSERT_FATAL(subsystem->ns[nsid - 1] != NULL);
+	CU_ASSERT(subsystem->ns[nsid - 1]->bdev == &g_bdevs[1]);
+
+	rc = spdk_nvmf_subsystem_start(subsystem, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(subsystem->state == SPDK_NVMF_SUBSYSTEM_ACTIVE);
+
+	/* Successfully namespace pause/resume */
+	rc = spdk_nvmf_ns_pause(subsystem, 1, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	rc = spdk_nvmf_ns_resume(subsystem, 1, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	/* Bad namespace pause due to paused subsystem */
+	rc = spdk_nvmf_subsystem_pause(subsystem, SPDK_NVME_GLOBAL_NS_TAG, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(subsystem->state == SPDK_NVMF_SUBSYSTEM_PAUSED);
+
+	rc = spdk_nvmf_ns_pause(subsystem, 1, NULL, NULL);
+	CU_ASSERT(rc == -EPERM);
+
+	rc = spdk_nvmf_subsystem_resume(subsystem, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(subsystem->state == SPDK_NVMF_SUBSYSTEM_ACTIVE);
+
+	/* Bad namespace resume due to paused subsystem */
+	rc = spdk_nvmf_ns_pause(subsystem, 1, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	rc = spdk_nvmf_subsystem_pause(subsystem, SPDK_NVME_GLOBAL_NS_TAG, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(subsystem->state == SPDK_NVMF_SUBSYSTEM_PAUSED);
+
+	rc = spdk_nvmf_ns_resume(subsystem, 1, NULL, NULL);
+	CU_ASSERT(rc == -EPERM);
+
+	rc = spdk_nvmf_subsystem_resume(subsystem, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(subsystem->state == SPDK_NVMF_SUBSYSTEM_ACTIVE);
+
+	/* Stop subsystem */
+	rc = spdk_nvmf_subsystem_stop(subsystem, NULL, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(subsystem->state == SPDK_NVMF_SUBSYSTEM_INACTIVE);
+
+	/* Destroy subsystem */
+	rc = spdk_nvmf_subsystem_destroy(subsystem, NULL, NULL);
+	CU_ASSERT(rc == 0);
+
+	spdk_io_device_unregister(&tgt, NULL);
+	poll_threads();
+
+	free(tgt.subsystems);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1794,6 +1903,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvmf_valid_nqn);
 	CU_ADD_TEST(suite, test_nvmf_ns_reservation_restore);
 	CU_ADD_TEST(suite, test_nvmf_subsystem_state_change);
+	CU_ADD_TEST(suite, test_nvmf_ns_state_change);
 
 	allocate_threads(1);
 	set_thread(0);

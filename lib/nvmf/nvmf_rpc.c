@@ -2486,3 +2486,139 @@ rpc_nvmf_subsystem_get_listeners(struct spdk_jsonrpc_request *request,
 }
 SPDK_RPC_REGISTER("nvmf_subsystem_get_listeners", rpc_nvmf_subsystem_get_listeners,
 		  SPDK_RPC_RUNTIME);
+
+struct rpc_pause_resume_namespace {
+	char		*nqn;
+	char		*tgt_name;
+	uint32_t	nsid;
+};
+
+static void
+free_rpc_pause_resume_namespace(struct rpc_pause_resume_namespace *r)
+{
+	free(r->nqn);
+	free(r->tgt_name);
+}
+
+static void
+rpc_nvmf_namespace_pause_resume_done(struct spdk_nvmf_subsystem *subsystem,
+				     void *cb_arg, int status)
+{
+	struct spdk_jsonrpc_request *request = cb_arg;
+
+	if (status) {
+		spdk_jsonrpc_send_bool_response(request, false);
+	} else {
+		spdk_jsonrpc_send_bool_response(request, true);
+	}
+}
+
+static const struct spdk_json_object_decoder rpc_pause_resume_namespace_decoders[] = {
+	{"nqn", offsetof(struct rpc_pause_resume_namespace, nqn), spdk_json_decode_string},
+	{"nsid", offsetof(struct rpc_pause_resume_namespace, nsid), spdk_json_decode_uint32},
+	{"tgt_name", offsetof(struct rpc_pause_resume_namespace, tgt_name), spdk_json_decode_string, true},
+};
+
+static void
+rpc_nvmf_pause_namespace(struct spdk_jsonrpc_request *request,
+			 const struct spdk_json_val *params)
+{
+	struct rpc_pause_resume_namespace req = { 0 };
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_tgt *tgt;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_pause_resume_namespace_decoders,
+				    SPDK_COUNTOF(rpc_pause_resume_namespace_decoders),
+				    &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		goto invalid;
+	}
+
+	if (req.nqn == NULL) {
+		SPDK_ERRLOG("missing name param\n");
+		goto invalid;
+	}
+
+	tgt = spdk_nvmf_get_tgt(req.tgt_name);
+	if (!tgt) {
+		SPDK_ERRLOG("Unable to find a target object.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target");
+		goto invalid_custom_response;
+	}
+
+	subsystem = spdk_nvmf_tgt_find_subsystem(tgt, req.nqn);
+	if (!subsystem) {
+		SPDK_ERRLOG("Unable to find subsystem with NQN %s\n", req.nqn);
+		goto invalid;
+	}
+
+	rc = spdk_nvmf_ns_pause(subsystem, req.nsid, rpc_nvmf_namespace_pause_resume_done, request);
+	if (rc != 0) {
+		SPDK_ERRLOG("Pausing namespace %u of subsystem with NQN %s failed\n", req.nsid, req.nqn);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Internal error");
+	}
+
+	free_rpc_pause_resume_namespace(&req);
+
+	return;
+
+invalid:
+	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+invalid_custom_response:
+	free_rpc_pause_resume_namespace(&req);
+}
+SPDK_RPC_REGISTER("nvmf_pause_namespace", rpc_nvmf_pause_namespace,
+		  SPDK_RPC_RUNTIME);
+
+static void
+rpc_nvmf_resume_namespace(struct spdk_jsonrpc_request *request,
+			  const struct spdk_json_val *params)
+{
+	struct rpc_pause_resume_namespace req = { 0 };
+	struct spdk_nvmf_subsystem *subsystem;
+	struct spdk_nvmf_tgt *tgt;
+
+	if (spdk_json_decode_object(params, rpc_pause_resume_namespace_decoders,
+				    SPDK_COUNTOF(rpc_pause_resume_namespace_decoders),
+				    &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		goto invalid;
+	}
+
+	if (req.nqn == NULL) {
+		SPDK_ERRLOG("missing name param\n");
+		goto invalid;
+	}
+
+	tgt = spdk_nvmf_get_tgt(req.tgt_name);
+	if (!tgt) {
+		SPDK_ERRLOG("Unable to find a target object.\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "Unable to find a target");
+		goto invalid_custom_response;
+	}
+
+	subsystem = spdk_nvmf_tgt_find_subsystem(tgt, req.nqn);
+	if (!subsystem) {
+		SPDK_ERRLOG("Unable to find subsystem with NQN %s\n", req.nqn);
+		goto invalid;
+	}
+
+	if (spdk_nvmf_ns_resume(subsystem, req.nsid, rpc_nvmf_namespace_pause_resume_done, request)) {
+		SPDK_ERRLOG("Resuming namespace %u of subsystem with NQN %s failed\n", req.nsid, req.nqn);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "Internal error");
+	}
+
+	free_rpc_pause_resume_namespace(&req);
+
+	return;
+
+invalid:
+	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+invalid_custom_response:
+	free_rpc_pause_resume_namespace(&req);
+}
+SPDK_RPC_REGISTER("nvmf_resume_namespace", rpc_nvmf_resume_namespace,
+		  SPDK_RPC_RUNTIME);

@@ -1777,6 +1777,84 @@ fini:
 	}
 }
 
+void
+nvmf_poll_group_pause_ns(struct spdk_nvmf_poll_group *group,
+			 struct spdk_nvmf_subsystem *subsystem,
+			 uint32_t nsid,
+			 spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg)
+{
+	struct spdk_nvmf_subsystem_poll_group *sgroup;
+	struct spdk_nvmf_subsystem_pg_ns_info *ns_info = NULL;
+	int rc = 0;
+
+	if (subsystem->id >= group->num_sgroups) {
+		rc = -1;
+		goto fini;
+	}
+
+	sgroup = &group->sgroups[subsystem->id];
+	if (sgroup->state != SPDK_NVMF_SUBSYSTEM_ACTIVE) {
+		rc = -1;
+		goto fini;
+	}
+
+	/* NOTE: This implicitly also checks for 0, since 0 - 1 wraps around to UINT32_MAX. */
+	if (nsid - 1 < sgroup->num_ns) {
+		ns_info  = &sgroup->ns_info[nsid - 1];
+		ns_info->state = SPDK_NVMF_SUBSYSTEM_PAUSED;
+	}
+
+fini:
+	if (cb_fn) {
+		cb_fn(cb_arg, rc);
+	}
+}
+
+void
+nvmf_poll_group_resume_ns(struct spdk_nvmf_poll_group *group,
+			  struct spdk_nvmf_subsystem *subsystem,
+			  uint32_t nsid,
+			  spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg)
+{
+	struct spdk_nvmf_request *req, *tmp;
+	struct spdk_nvmf_subsystem_poll_group *sgroup;
+	struct spdk_nvmf_subsystem_pg_ns_info *ns_info = NULL;
+	int rc = 0;
+
+	if (subsystem->id >= group->num_sgroups) {
+		rc = -1;
+		goto fini;
+	}
+
+	sgroup = &group->sgroups[subsystem->id];
+	if (sgroup->state != SPDK_NVMF_SUBSYSTEM_ACTIVE) {
+		rc = -1;
+		goto fini;
+	}
+
+	/* NOTE: This implicitly also checks for 0, since 0 - 1 wraps around to UINT32_MAX. */
+	if (nsid - 1 < sgroup->num_ns) {
+		ns_info  = &sgroup->ns_info[nsid - 1];
+		ns_info->state = SPDK_NVMF_SUBSYSTEM_ACTIVE;
+	}
+
+	/* Release all queued requests for this namespace */
+	TAILQ_FOREACH_SAFE(req, &sgroup->queued, link, tmp) {
+		if (req->cmd->nvme_cmd.nsid == nsid) {
+			TAILQ_REMOVE(&sgroup->queued, req, link);
+			if (spdk_nvmf_request_using_zcopy(req)) {
+				spdk_nvmf_request_zcopy_start(req);
+			} else {
+				spdk_nvmf_request_exec(req);
+			}
+		}
+	}
+fini:
+	if (cb_fn) {
+		cb_fn(cb_arg, rc);
+	}
+}
+
 
 struct spdk_nvmf_poll_group *
 spdk_nvmf_get_optimal_poll_group(struct spdk_nvmf_qpair *qpair)

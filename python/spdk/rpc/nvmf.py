@@ -594,3 +594,43 @@ def nvmf_set_crdt(client, crdt1=None, crdt2=None, crdt3=None):
         params['crdt3'] = crdt3
 
     return client.call('nvmf_set_crdt', params)
+
+
+def nvmf_pause_namespace(client, nqn, nsid, tgt_name=None):
+    """Pause I/O over a NVMe-oF subsystem's namespace.
+
+    Args:
+        nqn: Subsystem NQN.
+        nsid: Namespace ID
+        tgt_name: name of the parent NVMe-oF target (optional).
+
+    Returns:
+        True or False
+    """
+    params = {'nqn': nqn,
+              'nsid': nsid}
+
+    if tgt_name:
+        params['tgt_name'] = tgt_name
+
+    return client.call('nvmf_pause_namespace', params)
+
+
+def nvmf_resume_namespace(client, nqn, nsid, tgt_name=None):
+    """Resume I/O over a NVMe-oF subsystem's namespace.
+
+    Args:
+        nqn: Subsystem NQN.
+        nsid: Namespace ID
+        tgt_name: name of the parent NVMe-oF target (optional).
+
+    Returns:
+        True or False
+    """
+    params = {'nqn': nqn,
+              'nsid': nsid}
+
+    if tgt_name:
+        params['tgt_name'] = tgt_name
+
+    return client.call('nvmf_resume_namespace', params)
