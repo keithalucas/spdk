@@ -467,6 +467,19 @@ spdk_nvmf_subsystem_destroy(struct spdk_nvmf_subsystem *subsystem, nvmf_subsyste
 /* we have to use the typedef in the function declaration to appease astyle. */
 typedef enum spdk_nvmf_subsystem_state spdk_nvmf_subsystem_state_t;
 
+static void
+nvmf_subsystem_set_all_nss_state(struct spdk_nvmf_subsystem *subsystem,
+				 enum spdk_nvmf_subsystem_state state)
+{
+	uint32_t i;
+
+	for (i = 0; i < subsystem->max_nsid; i++) {
+		if (subsystem->ns[i]) {
+			subsystem->ns[i]->state = state;
+		}
+	}
+}
+
 static spdk_nvmf_subsystem_state_t
 nvmf_subsystem_get_intermediate_state(enum spdk_nvmf_subsystem_state current_state,
 				      enum spdk_nvmf_subsystem_state requested_state)
@@ -549,6 +562,9 @@ nvmf_subsystem_set_state(struct spdk_nvmf_subsystem *subsystem,
 		__atomic_compare_exchange_n(&subsystem->state, &actual_old_state, state, false,
 					    __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 	}
+
+	nvmf_subsystem_set_all_nss_state(subsystem, state);
+
 	assert(actual_old_state == expected_old_state);
 	return actual_old_state - expected_old_state;
 }
@@ -1836,6 +1852,135 @@ spdk_nvmf_ns_get_opts(const struct spdk_nvmf_ns *ns, struct spdk_nvmf_ns_opts *o
 {
 	memset(opts, 0, opts_size);
 	memcpy(opts, &ns->opts, spdk_min(sizeof(ns->opts), opts_size));
+}
+
+static void
+ns_state_change_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct subsystem_state_change_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+
+	SPDK_DTRACE_PROBE4(ns_state_change_done, ctx->subsystem->subnqn, ctx->nsid
+			   ctx->requested_state,, status);
+
+	if (ctx->cb_fn) {
+		ctx->cb_fn(ctx->subsystem, ctx->cb_arg, status);
+	}
+	free(ctx);
+}
+
+static void
+ns_state_change_continue(void *ctx, int status)
+{
+	struct spdk_io_channel_iter *i = ctx;
+	struct subsystem_state_change_ctx *_ctx __attribute__((unused));
+
+	_ctx = spdk_io_channel_iter_get_ctx(i);
+	SPDK_DTRACE_PROBE3(ns_state_change_continue, _ctx->subsystem->subnqn, _ctx->nsid,
+			   _ctx->requested_state, spdk_thread_get_id(spdk_get_thread()));
+
+	spdk_for_each_channel_continue(i, status);
+}
+
+static void
+ns_state_change_on_pg(struct spdk_io_channel_iter *i)
+{
+	struct subsystem_state_change_ctx *ctx;
+	struct spdk_io_channel *ch;
+	struct spdk_nvmf_poll_group *group;
+
+	ctx = spdk_io_channel_iter_get_ctx(i);
+	ch = spdk_io_channel_iter_get_channel(i);
+	group = spdk_io_channel_get_ctx(ch);
+
+	SPDK_DTRACE_PROBE3(nvmf_pg_change_state, ctx->subsystem->subnqn,
+			   ctx->requested_state, spdk_thread_get_id(spdk_get_thread()));
+	switch (ctx->requested_state) {
+	case SPDK_NVMF_SUBSYSTEM_ACTIVE:
+		nvmf_poll_group_resume_ns(group, ctx->subsystem, ctx->nsid,
+					  ns_state_change_continue, i);
+		break;
+	case SPDK_NVMF_SUBSYSTEM_PAUSED:
+		nvmf_poll_group_pause_ns(group, ctx->subsystem, ctx->nsid,
+					 ns_state_change_continue, i);
+		break;
+	default:
+		assert(false);
+		break;
+	}
+}
+
+static int
+nvmf_ns_state_change(struct spdk_nvmf_subsystem *subsystem,
+		     uint32_t nsid,
+		     enum spdk_nvmf_subsystem_state requested_state,
+		     spdk_nvmf_subsystem_state_change_done cb_fn,
+		     void *cb_arg)
+{
+	struct subsystem_state_change_ctx *ctx;
+
+	SPDK_DTRACE_PROBE3(nvmf_ns_state_change, subsystem->subnqn,
+			   nsid, requested_state);
+
+	if (requested_state != SPDK_NVMF_SUBSYSTEM_ACTIVE &&
+	    requested_state != SPDK_NVMF_SUBSYSTEM_PAUSED) {
+		SPDK_ERRLOG("Namespace can be only paused or resumed\n");
+		return -EPERM;
+	}
+
+	if (subsystem->state != SPDK_NVMF_SUBSYSTEM_ACTIVE) {
+		SPDK_ERRLOG("Namespace can be paused/resumed only if subsystem is active\n");
+		return -EPERM;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		return -ENOMEM;
+	}
+
+	subsystem->ns[nsid - 1]->state = requested_state;
+
+	ctx->subsystem = subsystem;
+	ctx->nsid = nsid;
+	ctx->requested_state = requested_state;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	spdk_for_each_channel(subsystem->tgt,
+			      ns_state_change_on_pg,
+			      ctx,
+			      ns_state_change_done);
+
+	return 0;
+}
+
+int
+spdk_nvmf_ns_pause(struct spdk_nvmf_subsystem *subsystem,
+		   uint32_t nsid,
+		   spdk_nvmf_subsystem_state_change_done cb_fn,
+		   void *cb_arg)
+{
+	return nvmf_ns_state_change(subsystem, nsid, SPDK_NVMF_SUBSYSTEM_PAUSED, cb_fn, cb_arg);
+}
+
+int
+spdk_nvmf_ns_resume(struct spdk_nvmf_subsystem *subsystem,
+		    uint32_t nsid,
+		    spdk_nvmf_subsystem_state_change_done cb_fn,
+		    void *cb_arg)
+{
+	return nvmf_ns_state_change(subsystem, nsid, SPDK_NVMF_SUBSYSTEM_ACTIVE, cb_fn, cb_arg);
+}
+
+bool
+spdk_nvmf_ns_is_paused(const struct spdk_nvmf_subsystem *subsystem,
+		       uint32_t nsid)
+{
+	switch (subsystem->state) {
+	case SPDK_NVMF_SUBSYSTEM_ACTIVE:
+		return subsystem->ns[nsid - 1]->state == SPDK_NVMF_SUBSYSTEM_PAUSED;
+	default:
+		return false;
+	}
 }
 
 const char *

@@ -2628,6 +2628,34 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('-t3', '--crdt3', help='Command Retry Delay Time 3, in units of 100 milliseconds', type=int)
     p.set_defaults(func=nvmf_set_crdt)
 
+    def nvmf_pause_namespace(args):
+        rpc.nvmf.nvmf_pause_namespace(args.client,
+                                      nqn=args.subsystem_nqn,
+                                      nsid=args.namespace_id,
+                                      tgt_name=args.tgt_name)
+
+    p = subparsers.add_parser('nvmf_pause_namespace', help='Pause I/O over a NVMe-oF subsystem\'s namespace')
+    p.add_argument('subsystem_nqn',
+                   help='The nqn of namespace\'s parent subsystem. Example: nqn.2023-03.io.spdk:cnode1.',
+                   type=str)
+    p.add_argument('namespace_id', help='ID of the namespace to be paused. Start from 1.', type=int)
+    p.add_argument('-t', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
+    p.set_defaults(func=nvmf_pause_namespace)
+
+    def nvmf_resume_namespace(args):
+        rpc.nvmf.nvmf_resume_namespace(args.client,
+                                       nqn=args.subsystem_nqn,
+                                       nsid=args.namespace_id,
+                                       tgt_name=args.tgt_name)
+
+    p = subparsers.add_parser('nvmf_resume_namespace', help='Resume I/O over a NVMe-oF subsystem\'s namespace')
+    p.add_argument('subsystem_nqn',
+                   help='The nqn of namespace\'s parent subsystem. Example: nqn.2023-03.io.spdk:cnode1.',
+                   type=str)
+    p.add_argument('namespace_id', help='ID of the namespace to be resumed. Start from 1.', type=int)
+    p.add_argument('-t', '--tgt-name', help='The name of the parent NVMe-oF target (optional)', type=str)
+    p.set_defaults(func=nvmf_resume_namespace)
+
     # subsystem
     def framework_get_subsystems(args):
         print_dict(rpc.subsystem.framework_get_subsystems(args.client))

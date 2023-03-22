@@ -903,6 +903,55 @@ void spdk_nvmf_ns_get_opts(const struct spdk_nvmf_ns *ns, struct spdk_nvmf_ns_op
 			   size_t opts_size);
 
 /**
+ * Pause I/O over a NVMe-oF subsystem's namespace.
+ *
+ * In a paused state, all incoming I/O over that namespace are queued until the
+ * namespace or the entire subsystem is resumed.
+ * The subsystem must be in active state.
+ *
+ * \param subsystem The NVMe-oF subsystem.
+ * \param nsid ID of the namespace to pause.
+ * \param cb_fn A function that will be called once the subsystem has changed state.
+ * \param cb_arg Argument passed to cb_fn.
+ *
+ * \return 0 on success, or negated errno on failure. The callback provided will only
+ * be called on success.
+ */
+int spdk_nvmf_ns_pause(struct spdk_nvmf_subsystem *subsystem,
+		       uint32_t nsid,
+		       spdk_nvmf_subsystem_state_change_done cb_fn,
+		       void *cb_arg);
+
+/**
+ * Resume I/O over a NVMe-oF subsystem's namespace.
+ *
+ * All queued I/O over that namespace are released and executed.
+ * The subsystem must be in active state.
+ *
+ * \param subsystem The NVMe-oF subsystem.
+ * \param nsid ID of the namespace to resume.
+ * \param cb_fn A function that will be called once the subsystem has changed state.
+ * \param cb_arg Argument passed to cb_fn.
+ *
+ * \return 0 on success, or negated errno on failure. The callback provided will only
+ * be called on success.
+ */
+int spdk_nvmf_ns_resume(struct spdk_nvmf_subsystem *subsystem,
+			uint32_t nsid,
+			spdk_nvmf_subsystem_state_change_done cb_fn,
+			void *cb_arg);
+
+/**
+ * Get a namespace's paused status.
+ *
+ * \param ns Namespace to query.
+ *
+ * \return true if namespace is paused, false otherwise.
+ */
+bool spdk_nvmf_ns_is_paused(const struct spdk_nvmf_subsystem *subsystem,
+			    uint32_t nsid);
+
+/**
  * Get the serial number of the specified subsystem.
  *
  * \param subsystem Subsystem to query.

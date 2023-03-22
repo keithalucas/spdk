@@ -178,6 +178,14 @@ struct spdk_nvmf_ns {
 	bool zcopy;
 	/* Command Set Identifier */
 	enum spdk_nvme_csi csi;
+	/* Namespace state reflects the subsystem's one; in addition a namespace can
+	 * be paused if the subsystem is active. Paused namespace means that only I/O
+	 * is stopped, keep alive for example goes on because the subsystem is active.
+	 * So namespace paused state can be considered as a subset of the subsystem's
+	 * paused state that doesn't need a new status in spdk_nvmf_subsystem_state
+	 * to cooperate with other management operations.
+	 */
+	enum spdk_nvmf_subsystem_state state;
 };
 
 /*
@@ -329,6 +337,14 @@ void nvmf_poll_group_pause_subsystem(struct spdk_nvmf_poll_group *group,
 				     spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
 void nvmf_poll_group_resume_subsystem(struct spdk_nvmf_poll_group *group,
 				      struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
+void nvmf_poll_group_pause_ns(struct spdk_nvmf_poll_group *group,
+			      struct spdk_nvmf_subsystem *subsystem,
+			      uint32_t nsid,
+			      spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
+void nvmf_poll_group_resume_ns(struct spdk_nvmf_poll_group *group,
+			       struct spdk_nvmf_subsystem *subsystem,
+			       uint32_t nsid,
+			       spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
 
 void nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn);
 void nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn, struct iovec *iov,
@@ -453,6 +469,29 @@ static inline bool
 nvmf_qpair_is_admin_queue(struct spdk_nvmf_qpair *qpair)
 {
 	return qpair->qid == 0;
+}
+
+static inline const char *
+nvmf_subsystem_get_state(enum spdk_nvmf_subsystem_state state)
+{
+	switch (state) {
+	case SPDK_NVMF_SUBSYSTEM_INACTIVE:
+		return "inactive";
+	case SPDK_NVMF_SUBSYSTEM_ACTIVATING:
+		return "activating";
+	case SPDK_NVMF_SUBSYSTEM_ACTIVE:
+		return "active";
+	case SPDK_NVMF_SUBSYSTEM_PAUSING:
+		return "pausing";
+	case SPDK_NVMF_SUBSYSTEM_PAUSED:
+		return "paused";
+	case SPDK_NVMF_SUBSYSTEM_RESUMING:
+		return "resuming";
+	case SPDK_NVMF_SUBSYSTEM_DEACTIVATING:
+		return "deactivating";
+	default:
+		return "unknown";
+	}
 }
 
 /**
