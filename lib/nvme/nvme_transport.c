@@ -537,7 +537,8 @@ nvme_transport_ctrlr_disconnect_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk
 void
 nvme_transport_ctrlr_disconnect_qpair_done(struct spdk_nvme_qpair *qpair)
 {
-	if (qpair->active_proc == nvme_ctrlr_get_current_process(qpair->ctrlr)) {
+	if (qpair->active_proc == nvme_ctrlr_get_current_process(qpair->ctrlr) ||
+	    nvme_qpair_is_admin_queue(qpair)) {
 		nvme_qpair_abort_all_queued_reqs(qpair, 0);
 	}
 	nvme_qpair_set_state(qpair, NVME_QPAIR_DISCONNECTED);
@@ -851,4 +852,16 @@ spdk_nvme_transport_set_opts(const struct spdk_nvme_transport_opts *opts, size_t
 #undef SET_FIELD
 
 	return 0;
+}
+
+volatile struct spdk_nvme_registers *
+spdk_nvme_ctrlr_get_registers(struct spdk_nvme_ctrlr *ctrlr)
+{
+	const struct spdk_nvme_transport *transport = nvme_get_transport(ctrlr->trid.trstring);
+
+	if (transport->ops.ctrlr_get_registers) {
+		return transport->ops.ctrlr_get_registers(ctrlr);
+	}
+
+	return NULL;
 }

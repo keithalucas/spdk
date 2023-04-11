@@ -15,6 +15,7 @@
 #include <sys/epoll.h>
 #endif
 
+#include "spdk/fd_group.h"
 #include "spdk/stdinc.h"
 #include "spdk/assert.h"
 #include "spdk/cpuset.h"
@@ -105,29 +106,6 @@ typedef void (*spdk_thread_pass_msg)(spdk_msg_fn fn, void *ctx,
  * if no work was done or SPDK_POLLER_BUSY if work was done.)
  */
 typedef int (*spdk_poller_fn)(void *ctx);
-
-/**
- * Function to be called to start a poller for the thread.
- *
- * \param thread_ctx Context for the thread.
- * \param fn Callback function for a poller.
- * \param arg Argument passed to callback.
- * \param period_microseconds Polling period in microseconds.
- *
- * \return a pointer to the poller on success, or NULL on failure.
- */
-typedef struct spdk_poller *(*spdk_start_poller)(void *thread_ctx,
-		spdk_poller_fn fn,
-		void *arg,
-		uint64_t period_microseconds);
-
-/**
- * Function to be called to stop a poller.
- *
- * \param poller Poller to stop.
- * \param thread_ctx Context for the thread.
- */
-typedef void (*spdk_stop_poller)(struct spdk_poller *poller, void *thread_ctx);
 
 /**
  * Callback function to set poller into interrupt mode or back to poll mode.
@@ -873,6 +851,17 @@ int spdk_interrupt_set_event_types(struct spdk_interrupt *intr,
  * \return The spdk_interrupt fd of thread itself.
  */
 int spdk_thread_get_interrupt_fd(struct spdk_thread *thread);
+
+/**
+ * Return an fd_group that becomes ready whenever any of the registered
+ * interrupt file descriptors are ready
+ *
+ *
+ * \param thread The thread to get.
+ *
+ * \return The spdk_fd_group of the thread itself.
+ */
+struct spdk_fd_group *spdk_thread_get_interrupt_fd_group(struct spdk_thread *thread);
 
 /**
  * Set SPDK run as event driven mode

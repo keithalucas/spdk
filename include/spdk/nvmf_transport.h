@@ -172,6 +172,8 @@ struct spdk_nvmf_poll_group {
 	spdk_nvmf_poll_group_destroy_done_fn		destroy_cb_fn;
 	void						*destroy_cb_arg;
 
+	struct spdk_nvmf_tgt				*tgt;
+
 	TAILQ_ENTRY(spdk_nvmf_poll_group)		link;
 
 	pthread_mutex_t					mutex;
@@ -236,9 +238,12 @@ struct spdk_nvmf_transport_ops {
 	void (*opts_init)(struct spdk_nvmf_transport_opts *opts);
 
 	/**
-	 * Create a transport for the given transport opts
+	 * Create a transport for the given transport opts. Either synchronous
+	 * or asynchronous version shall be implemented.
 	 */
 	struct spdk_nvmf_transport *(*create)(struct spdk_nvmf_transport_opts *opts);
+	int (*create_async)(struct spdk_nvmf_transport_opts *opts, spdk_nvmf_transport_create_done_cb cb_fn,
+			    void *cb_arg);
 
 	/**
 	 * Dump transport-specific opts into JSON
@@ -623,6 +628,26 @@ spdk_nvmf_req_get_xfer(struct spdk_nvmf_request *req) {
 
 	return xfer;
 }
+
+/**
+ * Complete Asynchronous Event as Error.
+ *
+ * \param ctrlr Controller whose AER is going to be completed.
+ * \param info Asynchronous Event Error Information to be reported.
+ *
+ * \return int. 0 if it completed successfully, or negative errno if it failed.
+ */
+int spdk_nvmf_ctrlr_async_event_error_event(struct spdk_nvmf_ctrlr *ctrlr,
+		enum spdk_nvme_async_event_info_error info);
+
+/**
+ * Abort outstanding Asynchronous Event Requests (AERs).
+ *
+ * Completes AERs with ABORTED_BY_REQUEST status code.
+ *
+ * \param ctrlr Controller whose AERs are going to be aborted.
+ */
+void spdk_nvmf_ctrlr_abort_aer(struct spdk_nvmf_ctrlr *ctrlr);
 
 /*
  * Macro used to register new transports.

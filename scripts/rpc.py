@@ -379,6 +379,7 @@ if __name__ == "__main__":
         print_json(rpc.bdev.bdev_malloc_create(args.client,
                                                num_blocks=int(num_blocks),
                                                block_size=args.block_size,
+                                               physical_block_size=args.physical_block_size,
                                                name=args.name,
                                                uuid=args.uuid,
                                                optimal_io_boundary=args.optimal_io_boundary,
@@ -392,6 +393,7 @@ if __name__ == "__main__":
     p.add_argument(
         'total_size', help='Size of malloc bdev in MB (float > 0)', type=float)
     p.add_argument('block_size', help='Data block size for this bdev', type=int)
+    p.add_argument('-p', '--physical-block-size', help='Physical block size for this bdev.', type=int)
     p.add_argument('-o', '--optimal-io-boundary', help="""Split on optimal IO boundary, in number of
     blocks, default 0 (disabled)""", type=int)
     p.add_argument('-m', '--md-size', type=int,
@@ -421,6 +423,7 @@ if __name__ == "__main__":
         print_json(rpc.bdev.bdev_null_create(args.client,
                                              num_blocks=num_blocks,
                                              block_size=args.block_size,
+                                             physical_block_size=args.physical_block_size,
                                              name=args.name,
                                              uuid=args.uuid,
                                              md_size=args.md_size,
@@ -433,6 +436,7 @@ if __name__ == "__main__":
     p.add_argument('total_size', help='Size of null bdev in MB (int > 0). Includes only data blocks.', type=int)
     p.add_argument('block_size', help='Block size for this bdev.'
                                       'Should be a sum of block size and metadata size if --md-size is used.', type=int)
+    p.add_argument('-p', '--physical-block-size', help='Physical block size for this bdev.', type=int)
     p.add_argument('-m', '--md-size', type=int,
                    help='Metadata size for this bdev. Default=0.')
     p.add_argument('-t', '--dif-type', type=int, choices=[0, 1, 2, 3],
@@ -868,7 +872,9 @@ if __name__ == "__main__":
     p.add_argument('-b', '--name', help='Name of the NVMe bdev', required=True)
     p.add_argument('-p', '--policy', help='Multipath policy (active_passive or active_active)', required=True)
     p.add_argument('-s', '--selector', help='Multipath selector (round_robin, queue_depth)', required=False)
-    p.add_argument('-r', '--rr-min-io', help='Number of IO to route to a path before switching to another for round-robin', required=False)
+    p.add_argument('-r', '--rr-min-io',
+                   help='Number of IO to route to a path before switching to another for round-robin',
+                   type=int, required=False)
     p.set_defaults(func=bdev_nvme_set_multipath_policy)
 
     def bdev_nvme_get_path_iostat(args):
@@ -1020,6 +1026,7 @@ if __name__ == "__main__":
         print_json(rpc.bdev.bdev_delay_create(args.client,
                                               base_bdev_name=args.base_bdev_name,
                                               name=args.name,
+                                              uuid=args.uuid,
                                               avg_read_latency=args.avg_read_latency,
                                               p99_read_latency=args.nine_nine_read_latency,
                                               avg_write_latency=args.avg_write_latency,
@@ -1029,6 +1036,7 @@ if __name__ == "__main__":
                               help='Add a delay bdev on existing bdev')
     p.add_argument('-b', '--base-bdev-name', help="Name of the existing bdev", required=True)
     p.add_argument('-d', '--name', help="Name of the delay bdev", required=True)
+    p.add_argument('-u', '--uuid', help='UUID of the bdev (optional)')
     p.add_argument('-r', '--avg-read-latency',
                    help="Average latency to apply before completing read ops (in microseconds)", required=True, type=int)
     p.add_argument('-t', '--nine-nine-read-latency',
@@ -1103,24 +1111,6 @@ if __name__ == "__main__":
     p = subparsers.add_parser('bdev_iscsi_delete', help='Delete an iSCSI bdev')
     p.add_argument('name', help='iSCSI bdev name')
     p.set_defaults(func=bdev_iscsi_delete)
-
-    def bdev_pmem_create(args):
-        print_json(rpc.bdev.bdev_pmem_create(args.client,
-                                             pmem_file=args.pmem_file,
-                                             name=args.name))
-
-    p = subparsers.add_parser('bdev_pmem_create', help='Add a bdev with pmem backend')
-    p.add_argument('pmem_file', help='Path to pmemblk pool file')
-    p.add_argument('-n', '--name', help='Block device name', required=True)
-    p.set_defaults(func=bdev_pmem_create)
-
-    def bdev_pmem_delete(args):
-        rpc.bdev.bdev_pmem_delete(args.client,
-                                  name=args.name)
-
-    p = subparsers.add_parser('bdev_pmem_delete', help='Delete a pmem bdev')
-    p.add_argument('name', help='pmem bdev name')
-    p.set_defaults(func=bdev_pmem_delete)
 
     def bdev_passthru_create(args):
         print_json(rpc.bdev.bdev_passthru_create(args.client,
@@ -1934,7 +1924,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     def bdev_lvol_create(args):
         print_json(rpc.lvol.bdev_lvol_create(args.client,
                                              lvol_name=args.lvol_name,
-                                             size=args.size * 1024 * 1024,
+                                             size_in_mib=args.size_in_mib,
                                              thin_provision=args.thin_provision,
                                              clear_method=args.clear_method,
                                              uuid=args.uuid,
@@ -1947,7 +1937,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('-c', '--clear-method', help="""Change default data clusters clear method.
         Available: none, unmap, write_zeroes""", required=False)
     p.add_argument('lvol_name', help='name for this lvol')
-    p.add_argument('size', help='size in MiB for this bdev', type=int)
+    p.add_argument('size_in_mib', help='size in MiB for this bdev', type=int)
     p.set_defaults(func=bdev_lvol_create)
 
     def bdev_lvol_snapshot(args):
@@ -1999,11 +1989,11 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     def bdev_lvol_resize(args):
         rpc.lvol.bdev_lvol_resize(args.client,
                                   name=args.name,
-                                  size=args.size * 1024 * 1024)
+                                  size_in_mib=args.size_in_mib)
 
     p = subparsers.add_parser('bdev_lvol_resize', help='Resize existing lvol bdev')
     p.add_argument('name', help='lvol bdev name')
-    p.add_argument('size', help='new size in MiB for this bdev', type=int)
+    p.add_argument('size_in_mib', help='new size in MiB for this bdev', type=int)
     p.set_defaults(func=bdev_lvol_resize)
 
     def bdev_lvol_set_read_only(args):
@@ -2605,36 +2595,6 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('-t3', '--crdt3', help='Command Retry Delay Time 3, in units of 100 milliseconds', type=int)
     p.set_defaults(func=nvmf_set_crdt)
 
-    # pmem
-    def bdev_pmem_create_pool(args):
-        num_blocks = int((args.total_size * 1024 * 1024) / args.block_size)
-        rpc.pmem.bdev_pmem_create_pool(args.client,
-                                       pmem_file=args.pmem_file,
-                                       num_blocks=num_blocks,
-                                       block_size=args.block_size)
-
-    p = subparsers.add_parser('bdev_pmem_create_pool', help='Create pmem pool')
-    p.add_argument('pmem_file', help='Path to pmemblk pool file')
-    p.add_argument('total_size', help='Size of pmem bdev in MB (int > 0)', type=int)
-    p.add_argument('block_size', help='Block size for this pmem pool', type=int)
-    p.set_defaults(func=bdev_pmem_create_pool)
-
-    def bdev_pmem_get_pool_info(args):
-        print_dict(rpc.pmem.bdev_pmem_get_pool_info(args.client,
-                                                    pmem_file=args.pmem_file))
-
-    p = subparsers.add_parser('bdev_pmem_get_pool_info', help='Display pmem pool info and check consistency')
-    p.add_argument('pmem_file', help='Path to pmemblk pool file')
-    p.set_defaults(func=bdev_pmem_get_pool_info)
-
-    def bdev_pmem_delete_pool(args):
-        rpc.pmem.bdev_pmem_delete_pool(args.client,
-                                       pmem_file=args.pmem_file)
-
-    p = subparsers.add_parser('bdev_pmem_delete_pool', help='Delete pmem pool')
-    p.add_argument('pmem_file', help='Path to pmemblk pool file')
-    p.set_defaults(func=bdev_pmem_delete_pool)
-
     # subsystem
     def framework_get_subsystems(args):
         print_dict(rpc.subsystem.framework_get_subsystems(args.client))
@@ -2898,7 +2858,7 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
 
     def accel_crypto_key_destroy(args):
         print_dict(rpc.accel.accel_crypto_key_destroy(args.client,
-                                                      name=args.name))
+                                                      key_name=args.name))
 
     p = subparsers.add_parser('accel_crypto_key_destroy', help='Destroy encryption key')
     p.add_argument('-n', '--name', help='key name', required=True, type=str)

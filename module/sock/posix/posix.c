@@ -69,8 +69,8 @@ struct spdk_posix_sock_group_impl {
 };
 
 static struct spdk_sock_impl_opts g_spdk_posix_sock_impl_opts = {
-	.recv_buf_size = MIN_SO_RCVBUF_SIZE,
-	.send_buf_size = MIN_SO_SNDBUF_SIZE,
+	.recv_buf_size = DEFAULT_SO_RCVBUF_SIZE,
+	.send_buf_size = DEFAULT_SO_SNDBUF_SIZE,
 	.enable_recv_pipe = true,
 	.enable_quickack = false,
 	.enable_placement_id = PLACEMENT_NONE,
@@ -273,13 +273,13 @@ posix_sock_alloc_pipe(struct spdk_posix_sock *sock, int sz)
 	}
 
 	/* Round up to next 64 byte multiple */
-	new_buf = calloc(SPDK_ALIGN_CEIL(sz + 1, 64), sizeof(uint8_t));
+	new_buf = calloc(SPDK_ALIGN_CEIL(sz, 64), sizeof(uint8_t));
 	if (!new_buf) {
 		SPDK_ERRLOG("socket recv buf allocation failed\n");
 		return -ENOMEM;
 	}
 
-	new_pipe = spdk_pipe_create(new_buf, sz + 1);
+	new_pipe = spdk_pipe_create(new_buf, sz);
 	if (new_pipe == NULL) {
 		SPDK_ERRLOG("socket pipe allocation failed\n");
 		free(new_buf);

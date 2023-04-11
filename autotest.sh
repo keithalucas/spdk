@@ -60,6 +60,7 @@ out=$output_dir
 cd $src
 
 freebsd_update_contigmem_mod
+freebsd_set_maxsock_buf
 
 # lcov takes considerable time to process clang coverage.
 # Disabling lcov allow us to do this.
@@ -82,7 +83,7 @@ if hash lcov && ! [[ "$CC_TYPE" == *"clang"* ]]; then
 fi
 
 # Make sure the disks are clean (no leftover partition tables)
-timing_enter cleanup
+timing_enter pre_cleanup
 # Remove old domain socket pathname just in case
 rm -f /var/tmp/spdk*.sock
 
@@ -128,7 +129,7 @@ if [[ $(uname -s) == Linux ]]; then
 	nvme_namespace_revert
 fi
 
-timing_exit cleanup
+timing_exit pre_cleanup
 
 # set up huge pages
 timing_enter afterboot
@@ -305,12 +306,6 @@ if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 		timing_exit vhost_initiator
 	fi
 
-	if [ $SPDK_TEST_PMDK -eq 1 ]; then
-		run_test "blockdev_pmem" $rootdir/test/bdev/blockdev.sh "pmem"
-		run_test "pmem" $rootdir/test/pmem/pmem.sh -x
-		run_test "spdkcli_pmem" $rootdir/test/spdkcli/pmem.sh
-	fi
-
 	if [ $SPDK_TEST_RBD -eq 1 ]; then
 		run_test "blockdev_rbd" $rootdir/test/bdev/blockdev.sh "rbd"
 		run_test "spdkcli_rbd" $rootdir/test/spdkcli/rbd.sh
@@ -365,9 +360,9 @@ fi
 
 trap - SIGINT SIGTERM EXIT
 
-timing_enter cleanup
+timing_enter post_cleanup
 autotest_cleanup
-timing_exit cleanup
+timing_exit post_cleanup
 
 timing_exit autotest
 chmod a+r $output_dir/timing.txt
@@ -382,6 +377,7 @@ if hash lcov && ! [[ "$CC_TYPE" == *"clang"* ]]; then
 	$LCOV -q -r $out/cov_total.info '/usr/*' -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/examples/vmd/*' -o $out/cov_total.info
 	$LCOV -q -r $out/cov_total.info '*/app/spdk_lspci/*' -o $out/cov_total.info
+	$LCOV -q -r $out/cov_total.info '*/app/spdk_top/*' -o $out/cov_total.info
 	owner=$(stat -c "%U" .)
 	sudo -u $owner git clean -f "*.gcda"
 	rm -f cov_base.info cov_test.info OLD_STDOUT OLD_STDERR

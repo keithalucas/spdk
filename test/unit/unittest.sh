@@ -222,10 +222,6 @@ if grep -q '#define SPDK_CONFIG_DPDK_COMPRESSDEV 1' $rootdir/include/spdk/config
 	run_test "unittest_dpdk_compressdev" $valgrind $testdir/lib/accel/dpdk_compressdev.c/accel_dpdk_compressdev_ut
 fi
 
-if grep -q '#define SPDK_CONFIG_PMDK 1' $rootdir/include/spdk/config.h; then
-	run_test "unittest_bdev_pmem" $valgrind $testdir/lib/bdev/pmem/bdev_pmem_ut
-fi
-
 if grep -q '#define SPDK_CONFIG_RAID5F 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_bdev_raid5f" $valgrind $testdir/lib/bdev/raid/raid5f.c/raid5f_ut
 fi
@@ -266,6 +262,10 @@ fi
 
 if grep -q '#define SPDK_CONFIG_RDMA 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_nvmf_rdma" $valgrind $testdir/lib/nvmf/rdma.c/rdma_ut
+fi
+
+if grep -q '#define SPDK_CONFIG_VFIO_USER 1' $rootdir/include/spdk/config.h; then
+	run_test "unittest_nvmf_vfio_user" $valgrind $testdir/lib/nvmf/vfio_user.c/vfio_user_ut
 fi
 
 run_test "unittest_scsi" unittest_scsi

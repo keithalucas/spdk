@@ -630,14 +630,7 @@ _idxd_flush_batch(struct spdk_idxd_io_channel *chan)
 static inline void
 _update_write_flags(struct spdk_idxd_io_channel *chan, struct idxd_hw_desc *desc)
 {
-	if (desc->flags & SPDK_IDXD_FLAG_PERSISTENT) {
-		/* recent spec changes require a different set of flags for PMEM writes */
-		desc->flags &= ~IDXD_FLAG_DEST_STEERING_TAG;
-		desc->flags &= ~IDXD_FLAG_CACHE_CONTROL;
-		desc->flags |= IDXD_FLAG_DEST_READBACK;
-	} else {
-		desc->flags ^= IDXD_FLAG_CACHE_CONTROL;
-	}
+	desc->flags ^= IDXD_FLAG_CACHE_CONTROL;
 }
 
 int
@@ -983,7 +976,7 @@ spdk_idxd_submit_crc32c(struct spdk_idxd_io_channel *chan,
 	uint64_t len, seg_len;
 	void *src;
 	size_t i;
-	uint64_t prev_crc;
+	uint64_t prev_crc = 0;
 
 	assert(chan != NULL);
 	assert(siov != NULL);
@@ -1078,7 +1071,7 @@ spdk_idxd_submit_copy_crc32c(struct spdk_idxd_io_channel *chan,
 	uint64_t len, seg_len;
 	struct spdk_ioviter iter;
 	struct idxd_vtophys_iter vtophys_iter;
-	uint64_t prev_crc;
+	uint64_t prev_crc = 0;
 
 	assert(chan != NULL);
 	assert(diov != NULL);

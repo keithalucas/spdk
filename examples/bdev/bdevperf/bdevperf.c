@@ -69,6 +69,7 @@ static int g_timeout_in_sec;
 static struct spdk_conf *g_bdevperf_conf = NULL;
 static const char *g_bdevperf_conf_file = NULL;
 static double g_zipf_theta;
+static bool g_random_map = false;
 
 static struct spdk_cpuset g_all_cpuset;
 static struct spdk_poller *g_perf_timer = NULL;
@@ -78,6 +79,8 @@ static void rpc_perform_tests_cb(void);
 
 static uint32_t g_bdev_count = 0;
 static uint32_t g_latency_display_level;
+
+static bool g_one_thread_per_lcore = false;
 
 static const double g_latency_cutoffs[] = {
 	0.01,
@@ -148,6 +151,7 @@ struct bdevperf_job {
 
 	/* keep channel's histogram data before being destroyed */
 	struct spdk_histogram_data	*histogram;
+	struct spdk_bit_array		*random_map;
 };
 
 struct spdk_bdevperf {
@@ -182,6 +186,7 @@ struct job_config {
 	int				bs;
 	int				iodepth;
 	int				rwmixread;
+	uint32_t			lcore;
 	int64_t				offset;
 	uint64_t			length;
 	enum job_config_rw		rw;
@@ -208,6 +213,15 @@ struct bdevperf_aggregate_stats {
 };
 
 static struct bdevperf_aggregate_stats g_stats = {.min_latency = (double)UINT64_MAX};
+
+struct lcore_thread {
+	struct spdk_thread		*thread;
+	uint32_t			lcore;
+	TAILQ_ENTRY(lcore_thread)	link;
+};
+
+TAILQ_HEAD(, lcore_thread) g_lcore_thread_list
+	= TAILQ_HEAD_INITIALIZER(g_lcore_thread_list);
 
 /*
  * Cumulative Moving Average (CMA): average of all data up to current
@@ -268,12 +282,12 @@ performance_dump_job(struct bdevperf_aggregate_stats *stats, struct bdevperf_job
 	uint64_t total_io;
 	struct latency_info latency_info = {};
 
-	printf("\r Job: %s (Core Mask 0x%s)\n", spdk_thread_get_name(job->thread),
+	printf("\r Job: %s (Core Mask 0x%s)\n", job->name,
 	       spdk_cpuset_fmt(spdk_thread_get_cpumask(job->thread)));
 
 	if (job->io_failed > 0 && !job->reset && !job->continue_on_failure) {
 		printf("\r Job: %s ended in about %.2f seconds with error\n",
-		       spdk_thread_get_name(job->thread), (double)job->run_time_in_usec / SPDK_SEC_TO_USEC);
+		       job->name, (double)job->run_time_in_usec / SPDK_SEC_TO_USEC);
 	}
 	if (job->verify) {
 		printf("\t Verification LBA range: start 0x%" PRIx64 " length 0x%" PRIx64 "\n",
@@ -448,6 +462,7 @@ bdevperf_job_free(struct bdevperf_job *job)
 {
 	spdk_histogram_data_free(job->histogram);
 	spdk_bit_array_free(&job->outstanding);
+	spdk_bit_array_free(&job->random_map);
 	spdk_zipf_free(&job->zipf);
 	free(job->name);
 	free(job);
@@ -503,6 +518,7 @@ bdevperf_test_done(void *ctx)
 {
 	struct bdevperf_job *job, *jtmp;
 	struct bdevperf_task *task, *ttmp;
+	struct lcore_thread *lthread, *lttmp;
 	double average_latency = 0.0;
 	uint64_t time_in_usec;
 	int rc;
@@ -558,7 +574,7 @@ bdevperf_test_done(void *ctx)
 	printf("\n Latency summary\n");
 	TAILQ_FOREACH_SAFE(job, &g_bdevperf.jobs, link, jtmp) {
 		printf("\r =============================================\n");
-		printf("\r Job: %s (Core Mask 0x%s)\n", spdk_thread_get_name(job->thread),
+		printf("\r Job: %s (Core Mask 0x%s)\n", job->name,
 		       spdk_cpuset_fmt(spdk_thread_get_cpumask(job->thread)));
 
 		const double *cutoff = g_latency_cutoffs;
@@ -575,7 +591,7 @@ bdevperf_test_done(void *ctx)
 	printf("\r Latency histogram\n");
 	TAILQ_FOREACH_SAFE(job, &g_bdevperf.jobs, link, jtmp) {
 		printf("\r =============================================\n");
-		printf("\r Job: %s (Core Mask 0x%s)\n", spdk_thread_get_name(job->thread),
+		printf("\r Job: %s (Core Mask 0x%s)\n", job->name,
 		       spdk_cpuset_fmt(spdk_thread_get_cpumask(job->thread)));
 
 		spdk_histogram_data_iterate(job->histogram, print_bucket, NULL);
@@ -586,7 +602,9 @@ clean:
 	TAILQ_FOREACH_SAFE(job, &g_bdevperf.jobs, link, jtmp) {
 		TAILQ_REMOVE(&g_bdevperf.jobs, job, link);
 
-		spdk_thread_send_msg(job->thread, job_thread_exit, NULL);
+		if (!g_one_thread_per_lcore) {
+			spdk_thread_send_msg(job->thread, job_thread_exit, NULL);
+		}
 
 		TAILQ_FOREACH_SAFE(task, &job->task_list, link, ttmp) {
 			TAILQ_REMOVE(&job->task_list, task, link);
@@ -596,6 +614,14 @@ clean:
 		}
 
 		bdevperf_job_free(job);
+	}
+
+	if (g_one_thread_per_lcore) {
+		TAILQ_FOREACH_SAFE(lthread, &g_lcore_thread_list, link, lttmp) {
+			TAILQ_REMOVE(&g_lcore_thread_list, lthread, link);
+			spdk_thread_send_msg(lthread->thread, job_thread_exit, NULL);
+			free(lthread);
+		}
 	}
 
 	rc = g_run_rc;
@@ -1095,6 +1121,7 @@ bdevperf_submit_single(struct bdevperf_job *job, struct bdevperf_task *task)
 {
 	uint64_t offset_in_ios;
 	uint64_t rand_value;
+	uint32_t first_clear;
 
 	if (job->zipf) {
 		offset_in_ios = spdk_zipf_generate(job->zipf);
@@ -1105,6 +1132,31 @@ bdevperf_submit_single(struct bdevperf_job *job, struct bdevperf_task *task)
 		 */
 		rand_value = (uint64_t)rand_r(&job->seed) * RAND_MAX + rand_r(&job->seed);
 		offset_in_ios = rand_value % job->size_in_ios;
+
+		if (g_random_map) {
+			/* Make sure, that the offset does not exceed the maximum size
+			 * of the bit array (verified during job creation)
+			 */
+			assert(offset_in_ios < UINT32_MAX);
+
+			first_clear = spdk_bit_array_find_first_clear(job->random_map, (uint32_t)offset_in_ios);
+
+			if (first_clear == UINT32_MAX) {
+				first_clear = spdk_bit_array_find_first_clear(job->random_map, 0);
+
+				if (first_clear == UINT32_MAX) {
+					/* If there are no more clear bits in the array, we start over
+					 * and select the previously selected random value.
+					 */
+					spdk_bit_array_clear_mask(job->random_map);
+					first_clear = (uint32_t)offset_in_ios;
+				}
+			}
+
+			spdk_bit_array_set(job->random_map, first_clear);
+
+			offset_in_ios = first_clear;
+		}
 	} else {
 		offset_in_ios = job->offset_in_ios++;
 		if (job->offset_in_ios == job->size_in_ios) {
@@ -1659,6 +1711,11 @@ bdevperf_construct_job(struct spdk_bdev *bdev, struct job_config *config,
 	}
 
 	if (job->verify) {
+		if (job->size_in_ios >= UINT32_MAX) {
+			SPDK_ERRLOG("Due to constraints of verify operation, the job storage capacity is too large\n");
+			bdevperf_job_free(job);
+			return -ENOMEM;
+		}
 		job->outstanding = spdk_bit_array_create(job->size_in_ios);
 		if (job->outstanding == NULL) {
 			SPDK_ERRLOG("Could not create outstanding array bitmap for bdev %s\n",
@@ -1684,6 +1741,21 @@ bdevperf_construct_job(struct spdk_bdev *bdev, struct job_config *config,
 
 	TAILQ_INIT(&job->task_list);
 
+	if (g_random_map) {
+		if (job->size_in_ios >= UINT32_MAX) {
+			SPDK_ERRLOG("Due to constraints of the random map, the job storage capacity is too large\n");
+			bdevperf_job_free(job);
+			return -ENOMEM;
+		}
+		job->random_map = spdk_bit_array_create(job->size_in_ios);
+		if (job->random_map == NULL) {
+			SPDK_ERRLOG("Could not create random_map array bitmap for bdev %s\n",
+				    spdk_bdev_get_name(bdev));
+			bdevperf_job_free(job);
+			return -ENOMEM;
+		}
+	}
+
 	task_num = job->queue_depth;
 	if (job->reset) {
 		task_num += 1;
@@ -1698,6 +1770,7 @@ bdevperf_construct_job(struct spdk_bdev *bdev, struct job_config *config,
 		task = calloc(1, sizeof(struct bdevperf_task));
 		if (!task) {
 			fprintf(stderr, "Failed to allocate task from memory\n");
+			spdk_zipf_free(&job->zipf);
 			return -ENOMEM;
 		}
 
@@ -1705,6 +1778,7 @@ bdevperf_construct_job(struct spdk_bdev *bdev, struct job_config *config,
 					 SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 		if (!task->buf) {
 			fprintf(stderr, "Cannot allocate buf for task=%p\n", task);
+			spdk_zipf_free(&job->zipf);
 			free(task);
 			return -ENOMEM;
 		}
@@ -1715,6 +1789,7 @@ bdevperf_construct_job(struct spdk_bdev *bdev, struct job_config *config,
 						    SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 			if (!task->md_buf) {
 				fprintf(stderr, "Cannot allocate md buf for task=%p\n", task);
+				spdk_zipf_free(&job->zipf);
 				spdk_free(task->buf);
 				free(task);
 				return -ENOMEM;
@@ -1803,6 +1878,20 @@ config_filename_next(const char *filename, char *out)
 	return filename + i;
 }
 
+static struct spdk_thread *
+get_lcore_thread(uint32_t lcore)
+{
+	struct lcore_thread *lthread;
+
+	TAILQ_FOREACH(lthread, &g_lcore_thread_list, link) {
+		if (lthread->lcore == lcore) {
+			return lthread->thread;
+		}
+	}
+
+	return NULL;
+}
+
 static void
 bdevperf_construct_jobs(void)
 {
@@ -1816,7 +1905,11 @@ bdevperf_construct_jobs(void)
 	TAILQ_FOREACH(config, &job_config_list, link) {
 		filenames = config->filename;
 
-		thread = construct_job_thread(&config->cpumask, config->name);
+		if (!g_one_thread_per_lcore) {
+			thread = construct_job_thread(&config->cpumask, config->name);
+		} else {
+			thread = get_lcore_thread(config->lcore);
+		}
 		assert(thread);
 
 		while (filenames) {
@@ -1853,8 +1946,9 @@ make_cli_job_config(const char *filename, int64_t offset, uint64_t range)
 
 	config->name = filename;
 	config->filename = filename;
+	config->lcore = _get_next_core();
 	spdk_cpuset_zero(&config->cpumask);
-	spdk_cpuset_set_cpu(&config->cpumask, _get_next_core(), true);
+	spdk_cpuset_set_cpu(&config->cpumask, config->lcore, true);
 	config->bs = g_io_size;
 	config->iodepth = g_queue_depth;
 	config->rwmixread = g_rw_percentage;
@@ -1932,9 +2026,31 @@ bdevperf_construct_job_config(void *ctx, struct spdk_bdev *bdev)
 }
 
 static void
+create_lcore_thread(uint32_t lcore)
+{
+	struct lcore_thread *lthread;
+	struct spdk_cpuset cpumask = {};
+	char name[32];
+
+	lthread = calloc(1, sizeof(*lthread));
+	assert(lthread != NULL);
+
+	lthread->lcore = lcore;
+
+	snprintf(name, sizeof(name), "lcore_%u", lcore);
+	spdk_cpuset_set_cpu(&cpumask, lcore, true);
+
+	lthread->thread = spdk_thread_create(name, &cpumask);
+	assert(lthread->thread != NULL);
+
+	TAILQ_INSERT_TAIL(&g_lcore_thread_list, lthread, link);
+}
+
+static void
 bdevperf_construct_job_configs(void)
 {
 	struct spdk_bdev *bdev;
+	uint32_t i;
 
 	/* There are three different modes for allocating jobs. Standard mode
 	 * (the default) creates one spdk_thread per bdev and runs the I/O job there.
@@ -1947,16 +2063,25 @@ bdevperf_construct_job_configs(void)
 	 * In "FIO" mode, threads are spawned per-job instead of per-bdev.
 	 * Each FIO job can be individually parameterized by filename, cpu mask, etc,
 	 * which is different from other modes in that they only support global options.
+	 *
+	 * Both for standard mode and "multithread" mode, if the -E flag is specified,
+	 * it creates one spdk_thread PER CORE. On each core, one spdk_thread is shared by
+	 * multiple jobs.
 	 */
 
 	if (g_bdevperf_conf) {
 		goto end;
-	} else if (g_multithread_mode) {
-		bdevperf_construct_multithread_job_configs();
-		goto end;
 	}
 
-	if (g_job_bdev_name != NULL) {
+	if (g_one_thread_per_lcore) {
+		SPDK_ENV_FOREACH_CORE(i) {
+			create_lcore_thread(i);
+		}
+	}
+
+	if (g_multithread_mode) {
+		bdevperf_construct_multithread_job_configs();
+	} else if (g_job_bdev_name != NULL) {
 		bdev = spdk_bdev_get_by_name(g_job_bdev_name);
 		if (bdev) {
 			/* Construct the job */
@@ -2330,6 +2455,10 @@ bdevperf_parse_arg(int ch, char *arg)
 		}
 	} else if (ch == 'l') {
 		g_latency_display_level++;
+	} else if (ch == 'D') {
+		g_random_map = true;
+	} else if (ch == 'E') {
+		g_one_thread_per_lcore = true;
 	} else {
 		tmp = spdk_strtoll(optarg, 10);
 		if (tmp < 0) {
@@ -2394,6 +2523,8 @@ bdevperf_usage(void)
 	printf(" -C                        enable every core to send I/Os to each bdev\n");
 	printf(" -j <filename>             use job config file\n");
 	printf(" -l                        display latency histogram, default: disable. -l display summary, -ll display details\n");
+	printf(" -D                        use a random map for picking offsets not previously read or written (for all jobs)\n");
+	printf(" -E                        share per lcore thread among jobs. Available only if -j is not used.\n");
 }
 
 static int
@@ -2413,6 +2544,10 @@ verify_test_params(struct spdk_app_opts *opts)
 		goto out;
 	}
 	if (!g_bdevperf_conf_file && !g_workload_type) {
+		goto out;
+	}
+	if (g_bdevperf_conf_file && g_one_thread_per_lcore) {
+		printf("If bdevperf's config file is used, per lcore thread cannot be used\n");
 		goto out;
 	}
 	if (g_time_in_sec <= 0) {
@@ -2485,6 +2620,16 @@ verify_test_params(struct spdk_app_opts *opts)
 		}
 	}
 
+	if (strcmp(g_workload_type, "randread") &&
+	    strcmp(g_workload_type, "randwrite") &&
+	    strcmp(g_workload_type, "randrw")) {
+		if (g_random_map) {
+			fprintf(stderr, "Ignoring -D option... Please use -D option"
+				" only when using randread, randwrite or randrw.\n");
+			return 1;
+		}
+	}
+
 	return 0;
 out:
 	spdk_app_usage();
@@ -2506,7 +2651,7 @@ main(int argc, char **argv)
 	opts.rpc_addr = NULL;
 	opts.shutdown_cb = spdk_bdevperf_shutdown_cb;
 
-	if ((rc = spdk_app_parse_args(argc, argv, &opts, "Zzfq:o:t:w:k:CF:M:P:S:T:Xlj:", NULL,
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "Zzfq:o:t:w:k:CEF:M:P:S:T:Xlj:D", NULL,
 				      bdevperf_parse_arg, bdevperf_usage)) !=
 	    SPDK_APP_PARSE_ARGS_SUCCESS) {
 		return rc;

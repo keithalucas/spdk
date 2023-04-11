@@ -22,6 +22,8 @@
 	spdk_blob_get_num_clusters;
 	spdk_blob_get_next_allocated_io_unit;
 	spdk_blob_get_next_unallocated_io_unit;
+	spdk_blob_get_shallow_copy_cluster_index;
+	spdk_blob_get_shallow_copy_total_clusters;
 	spdk_blob_opts_init;
 	spdk_bs_create_blob_ext;
 	spdk_bs_create_blob;
@@ -29,10 +31,12 @@
 	spdk_bs_create_clone;
 	spdk_blob_get_clones;
 	spdk_blob_get_parent_snapshot;
+	spdk_blob_get_esnap_id;
 	spdk_blob_is_read_only;
 	spdk_blob_is_snapshot;
 	spdk_blob_is_clone;
 	spdk_blob_is_thin_provisioned;
+	spdk_blob_is_esnap_clone;
 	spdk_bs_delete_blob;
 	spdk_bs_inflate_blob;
 	spdk_bs_blob_decouple_parent;
@@ -65,6 +69,7 @@
 	spdk_xattr_names_free;
 	spdk_bs_get_bstype;
 	spdk_bs_set_bstype;
+	spdk_blob_set_esnap_bs_dev;
 
 	local: *;
 };

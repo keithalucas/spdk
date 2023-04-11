@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
- *   Copyright (c) 2021-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -41,6 +41,31 @@ static void blob_write_extent_page(struct spdk_blob *blob, uint32_t extent, uint
 				   struct spdk_blob_md_page *page, spdk_blob_op_complete cb_fn, void *cb_arg);
 
 static void bs_shallow_copy_cluster_find_next(void *cb_arg, int bserrno);
+
+/*
+ * External snapshots require a channel per thread per esnap bdev.  The tree
+ * is populated lazily as blob IOs are handled by the back_bs_dev. When this
+ * channel is destroyed, all the channels in the tree are destroyed.
+ */
+
+struct blob_esnap_channel {
+	RB_ENTRY(blob_esnap_channel)	node;
+	spdk_blob_id			blob_id;
+	struct spdk_io_channel		*channel;
+};
+
+static int blob_esnap_channel_compare(struct blob_esnap_channel *c1, struct blob_esnap_channel *c2);
+static void blob_esnap_destroy_bs_dev_channels(struct spdk_blob *blob, bool abort_io,
+		spdk_blob_op_with_handle_complete cb_fn, void *cb_arg);
+static void blob_esnap_destroy_bs_channel(struct spdk_bs_channel *ch);
+RB_GENERATE_STATIC(blob_esnap_channel_tree, blob_esnap_channel, node, blob_esnap_channel_compare)
+
+static inline bool
+blob_is_esnap_clone(const struct spdk_blob *blob)
+{
+	assert(blob != NULL);
+	return !!(blob->invalid_flags & SPDK_BLOB_EXTERNAL_SNAPSHOT);
+}
 
 static int
 blob_id_cmp(struct spdk_blob *blob1, struct spdk_blob *blob2)
@@ -336,6 +361,50 @@ blob_free(struct spdk_blob *blob)
 	free(blob);
 }
 
+static void
+blob_back_bs_destroy_esnap_done(void *ctx, struct spdk_blob *blob, int bserrno)
+{
+	struct spdk_bs_dev	*bs_dev = ctx;
+
+	if (bserrno != 0) {
+		/*
+		 * This is probably due to a memory allocation failure when creating the
+		 * blob_esnap_destroy_ctx before iterating threads.
+		 */
+		SPDK_ERRLOG("blob 0x%" PRIx64 ": Unable to destroy bs dev channels: error %d\n",
+			    blob->id, bserrno);
+		assert(false);
+	}
+
+	if (bs_dev == NULL) {
+		/*
+		 * This check exists to make scanbuild happy.
+		 *
+		 * blob->back_bs_dev for an esnap is NULL during the first iteration of blobs while
+		 * the blobstore is being loaded. It could also be NULL if there was an error
+		 * opening the esnap device. In each of these cases, no channels could have been
+		 * created because back_bs_dev->create_channel() would have led to a NULL pointer
+		 * deref.
+		 */
+		assert(false);
+		return;
+	}
+
+	SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": calling destroy on back_bs_dev\n", blob->id);
+	bs_dev->destroy(bs_dev);
+}
+
+static void
+blob_back_bs_destroy(struct spdk_blob *blob)
+{
+	SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": preparing to destroy back_bs_dev\n",
+		      blob->id);
+
+	blob_esnap_destroy_bs_dev_channels(blob, false, blob_back_bs_destroy_esnap_done,
+					   blob->back_bs_dev);
+	blob->back_bs_dev = NULL;
+}
+
 struct freeze_io_ctx {
 	struct spdk_bs_cpl cpl;
 	struct spdk_blob *blob;
@@ -385,6 +454,8 @@ blob_freeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg
 {
 	struct freeze_io_ctx *ctx;
 
+	blob_verify_md_op(blob);
+
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
 		cb_fn(cb_arg, -ENOMEM);
@@ -399,18 +470,15 @@ blob_freeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg
 	/* Freeze I/O on blob */
 	blob->frozen_refcnt++;
 
-	if (blob->frozen_refcnt == 1) {
-		spdk_for_each_channel(blob->bs, blob_io_sync, ctx, blob_io_cpl);
-	} else {
-		cb_fn(cb_arg, 0);
-		free(ctx);
-	}
+	spdk_for_each_channel(blob->bs, blob_io_sync, ctx, blob_io_cpl);
 }
 
 static void
 blob_unfreeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
 	struct freeze_io_ctx *ctx;
+
+	blob_verify_md_op(blob);
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
@@ -427,12 +495,7 @@ blob_unfreeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_a
 
 	blob->frozen_refcnt--;
 
-	if (blob->frozen_refcnt == 0) {
-		spdk_for_each_channel(blob->bs, blob_execute_queued_io, ctx, blob_io_cpl);
-	} else {
-		cb_fn(cb_arg, 0);
-		free(ctx);
-	}
+	spdk_for_each_channel(blob->bs, blob_execute_queued_io, ctx, blob_io_cpl);
 }
 
 static int
@@ -1342,14 +1405,74 @@ blob_load_snapshot_cpl(void *cb_arg, struct spdk_blob *snapshot, int bserrno)
 
 static void blob_update_clear_method(struct spdk_blob *blob);
 
+static int
+blob_load_esnap(struct spdk_blob *blob, void *blob_ctx)
+{
+	struct spdk_blob_store *bs = blob->bs;
+	struct spdk_bs_dev *bs_dev = NULL;
+	const void *esnap_id = NULL;
+	size_t id_len = 0;
+	int rc;
+
+	if (bs->esnap_bs_dev_create == NULL) {
+		SPDK_NOTICELOG("blob 0x%" PRIx64 " is an esnap clone but the blobstore was opened "
+			       "without support for esnap clones\n", blob->id);
+		return -ENOTSUP;
+	}
+	assert(blob->back_bs_dev == NULL);
+
+	rc = blob_get_xattr_value(blob, BLOB_EXTERNAL_SNAPSHOT_ID, &esnap_id, &id_len, true);
+	if (rc != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 " is an esnap clone but has no esnap ID\n", blob->id);
+		return -EINVAL;
+	}
+	assert(id_len > 0 && id_len < UINT32_MAX);
+
+	SPDK_INFOLOG(blob, "Creating external snapshot device\n");
+
+	rc = bs->esnap_bs_dev_create(bs->esnap_ctx, blob_ctx, blob, esnap_id, (uint32_t)id_len,
+				     &bs_dev);
+	if (rc != 0) {
+		SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": failed to load back_bs_dev "
+			      "with error %d\n", blob->id, rc);
+		return rc;
+	}
+
+	/*
+	 * Note: bs_dev might be NULL if the consumer chose to not open the external snapshot.
+	 * This especially might happen during spdk_bs_load() iteration.
+	 */
+	if (bs_dev != NULL) {
+		SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": loaded back_bs_dev\n", blob->id);
+		if ((bs->io_unit_size % bs_dev->blocklen) != 0) {
+			SPDK_NOTICELOG("blob 0x%" PRIx64 " external snapshot device block size %u "
+				       "is not compatible with blobstore block size %u\n",
+				       blob->id, bs_dev->blocklen, bs->io_unit_size);
+			bs_dev->destroy(bs_dev);
+			return -EINVAL;
+		}
+	}
+
+	blob->back_bs_dev = bs_dev;
+	blob->parent_id = SPDK_BLOBID_EXTERNAL_SNAPSHOT;
+
+	return 0;
+}
+
 static void
-blob_load_backing_dev(void *cb_arg)
+blob_load_backing_dev(spdk_bs_sequence_t *seq, void *cb_arg)
 {
 	struct spdk_blob_load_ctx	*ctx = cb_arg;
 	struct spdk_blob		*blob = ctx->blob;
 	const void			*value;
 	size_t				len;
 	int				rc;
+
+	if (blob_is_esnap_clone(blob)) {
+		rc = blob_load_esnap(blob, seq->cpl.u.blob_handle.esnap_ctx);
+		blob_load_final(ctx, rc);
+		return;
+	}
 
 	if (spdk_blob_is_thin_provisioned(blob)) {
 		rc = blob_get_xattr_value(blob, BLOB_SNAPSHOT, &value, &len, true);
@@ -1455,7 +1578,7 @@ blob_load_cpl_extents_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 		}
 	}
 
-	blob_load_backing_dev(ctx);
+	blob_load_backing_dev(seq, ctx);
 }
 
 static void
@@ -1543,7 +1666,7 @@ blob_load_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	if (blob->extent_table_found) {
 		blob_load_cpl_extents_cpl(seq, ctx, 0);
 	} else {
-		blob_load_backing_dev(ctx);
+		blob_load_backing_dev(seq, ctx);
 	}
 }
 
@@ -2080,7 +2203,12 @@ blob_resize(struct spdk_blob *blob, uint64_t sz)
 		lfmd = 0;
 		for (i = num_clusters; i < sz; i++) {
 			bs_allocate_cluster(blob, i, &cluster, &lfmd, true);
-			lfmd++;
+			/* Do not increment lfmd here.  lfmd will get updated
+			 * to the md_page allocated (if any) when a new extent
+			 * page is needed.  Just pass that value again,
+			 * bs_allocate_cluster will just start at that index
+			 * to find the next free md_page when needed.
+			 */
 		}
 	}
 
@@ -2461,7 +2589,7 @@ blob_can_copy(struct spdk_blob *blob, uint32_t cluster_start_page, uint64_t *bas
 {
 	uint64_t lba = bs_dev_page_to_lba(blob->back_bs_dev, cluster_start_page);
 
-	return (blob->bs->dev->copy != NULL) &&
+	return (!blob_is_esnap_clone(blob) && blob->bs->dev->copy != NULL) &&
 	       blob->back_bs_dev->translate_lba(blob->back_bs_dev, lba, base_lba);
 }
 
@@ -2554,7 +2682,7 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
 	cpl.u.blob_basic.cb_fn = blob_allocate_and_copy_cluster_cpl;
 	cpl.u.blob_basic.cb_arg = ctx;
 
-	ctx->seq = bs_sequence_start(_ch, &cpl);
+	ctx->seq = bs_sequence_start_blob(_ch, &cpl, blob);
 	if (!ctx->seq) {
 		spdk_spin_lock(&blob->bs->used_lock);
 		bs_release_cluster(blob->bs, ctx->new_cluster);
@@ -2741,7 +2869,7 @@ blob_request_submit_op_split(struct spdk_io_channel *ch, struct spdk_blob *blob,
 	cpl.u.blob_basic.cb_fn = cb_fn;
 	cpl.u.blob_basic.cb_arg = cb_arg;
 
-	seq = bs_sequence_start(ch, &cpl);
+	seq = bs_sequence_start_blob(ch, &cpl, blob);
 	if (!seq) {
 		free(ctx);
 		cb_fn(cb_arg, -ENOMEM);
@@ -2797,7 +2925,7 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
 	case SPDK_BLOB_READ: {
 		spdk_bs_batch_t *batch;
 
-		batch = bs_batch_open(_ch, &cpl);
+		batch = bs_batch_open(_ch, &cpl, blob);
 		if (!batch) {
 			cb_fn(cb_arg, -ENOMEM);
 			return;
@@ -2825,7 +2953,7 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
 				return;
 			}
 
-			batch = bs_batch_open(_ch, &cpl);
+			batch = bs_batch_open(_ch, &cpl, blob);
 			if (!batch) {
 				cb_fn(cb_arg, -ENOMEM);
 				return;
@@ -2855,7 +2983,7 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
 	case SPDK_BLOB_UNMAP: {
 		spdk_bs_batch_t *batch;
 
-		batch = bs_batch_open(_ch, &cpl);
+		batch = bs_batch_open(_ch, &cpl, blob);
 		if (!batch) {
 			cb_fn(cb_arg, -ENOMEM);
 			return;
@@ -3069,7 +3197,7 @@ blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel *_chan
 		if (read) {
 			spdk_bs_sequence_t *seq;
 
-			seq = bs_sequence_start(_channel, &cpl);
+			seq = bs_sequence_start_blob(_channel, &cpl, blob);
 			if (!seq) {
 				cb_fn(cb_arg, -ENOMEM);
 				return;
@@ -3087,7 +3215,7 @@ blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel *_chan
 			if (is_allocated) {
 				spdk_bs_sequence_t *seq;
 
-				seq = bs_sequence_start(_channel, &cpl);
+				seq = bs_sequence_start_blob(_channel, &cpl, blob);
 				if (!seq) {
 					cb_fn(cb_arg, -ENOMEM);
 					return;
@@ -3222,6 +3350,7 @@ bs_channel_create(void *io_device, void *ctx_buf)
 
 	TAILQ_INIT(&channel->need_cluster_alloc);
 	TAILQ_INIT(&channel->queued_io);
+	RB_INIT(&channel->esnap_channels);
 
 	return 0;
 }
@@ -3243,6 +3372,8 @@ bs_channel_destroy(void *io_device, void *ctx_buf)
 		TAILQ_REMOVE(&channel->queued_io, op, link);
 		bs_user_op_abort(op, -EIO);
 	}
+
+	blob_esnap_destroy_bs_channel(channel);
 
 	free(channel->req_mem);
 	spdk_free(channel->new_cluster_page);
@@ -3288,7 +3419,8 @@ bs_blob_list_add(struct spdk_blob *blob)
 	assert(blob != NULL);
 
 	snapshot_id = blob->parent_id;
-	if (snapshot_id == SPDK_BLOBID_INVALID) {
+	if (snapshot_id == SPDK_BLOBID_INVALID ||
+	    snapshot_id == SPDK_BLOBID_EXTERNAL_SNAPSHOT) {
 		return 0;
 	}
 
@@ -3411,6 +3543,8 @@ spdk_bs_opts_init(struct spdk_bs_opts *opts, size_t opts_size)
 	SET_FIELD(iter_cb_fn, NULL);
 	SET_FIELD(iter_cb_arg, NULL);
 	SET_FIELD(force_recover, false);
+	SET_FIELD(esnap_bs_dev_create, NULL);
+	SET_FIELD(esnap_ctx, NULL);
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -3538,6 +3672,8 @@ bs_alloc(struct spdk_bs_dev *dev, struct spdk_bs_opts *opts, struct spdk_blob_st
 	bs->max_channel_ops = opts->max_channel_ops;
 	bs->super_blob = SPDK_BLOBID_INVALID;
 	memcpy(&bs->bstype, &opts->bstype, sizeof(opts->bstype));
+	bs->esnap_bs_dev_create = opts->esnap_bs_dev_create;
+	bs->esnap_ctx = opts->esnap_ctx;
 
 	/* The metadata is assumed to be at least 1 page */
 	bs->used_md_pages = spdk_bit_array_create(1);
@@ -4614,12 +4750,14 @@ bs_opts_copy(struct spdk_bs_opts *src, struct spdk_bs_opts *dst)
 	SET_FIELD(iter_cb_fn);
 	SET_FIELD(iter_cb_arg);
 	SET_FIELD(force_recover);
+	SET_FIELD(esnap_bs_dev_create);
+	SET_FIELD(esnap_ctx);
 
 	dst->opts_size = src->opts_size;
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_bs_opts) == 72, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_bs_opts) == 88, "Incorrect size");
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -4671,7 +4809,7 @@ spdk_bs_load(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	cpl.u.bs_handle.cb_arg = cb_arg;
 	cpl.u.bs_handle.bs = bs;
 
-	ctx->seq = bs_sequence_start(bs->md_channel, &cpl);
+	ctx->seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!ctx->seq) {
 		spdk_free(ctx->super);
 		free(ctx);
@@ -5051,7 +5189,7 @@ spdk_bs_dump(struct spdk_bs_dev *dev, FILE *fp, spdk_bs_dump_print_xattr print_x
 	cpl.u.bs_basic.cb_fn = cb_fn;
 	cpl.u.bs_basic.cb_arg = cb_arg;
 
-	ctx->seq = bs_sequence_start(bs->md_channel, &cpl);
+	ctx->seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!ctx->seq) {
 		spdk_free(ctx->super);
 		free(ctx);
@@ -5268,7 +5406,7 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	cpl.u.bs_handle.cb_arg = cb_arg;
 	cpl.u.bs_handle.bs = bs;
 
-	seq = bs_sequence_start(bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!seq) {
 		spdk_free(ctx->super);
 		free(ctx);
@@ -5353,7 +5491,7 @@ spdk_bs_destroy(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn,
 
 	ctx->bs = bs;
 
-	seq = bs_sequence_start(bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!seq) {
 		free(ctx);
 		cb_fn(cb_arg, -ENOMEM);
@@ -5470,6 +5608,30 @@ spdk_bs_unload(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn, void *cb_a
 
 	SPDK_DEBUGLOG(blob, "Syncing blobstore\n");
 
+	/*
+	 * If external snapshot channels are being destroyed while the blobstore is unloaded, the
+	 * unload is deferred until after the channel destruction completes.
+	 */
+	if (bs->esnap_channels_unloading != 0) {
+		if (bs->esnap_unload_cb_fn != NULL) {
+			SPDK_ERRLOG("Blobstore unload in progress\n");
+			cb_fn(cb_arg, -EBUSY);
+			return;
+		}
+		SPDK_DEBUGLOG(blob_esnap, "Blobstore unload deferred: %" PRIu32
+			      " esnap clones are unloading\n", bs->esnap_channels_unloading);
+		bs->esnap_unload_cb_fn = cb_fn;
+		bs->esnap_unload_cb_arg = cb_arg;
+		return;
+	}
+	if (bs->esnap_unload_cb_fn != NULL) {
+		SPDK_DEBUGLOG(blob_esnap, "Blobstore deferred unload progressing\n");
+		assert(bs->esnap_unload_cb_fn == cb_fn);
+		assert(bs->esnap_unload_cb_arg == cb_arg);
+		bs->esnap_unload_cb_fn = NULL;
+		bs->esnap_unload_cb_arg = NULL;
+	}
+
 	if (!RB_EMPTY(&bs->open_blobs)) {
 		SPDK_ERRLOG("Blobstore still has open blobs\n");
 		cb_fn(cb_arg, -EBUSY);
@@ -5496,7 +5658,7 @@ spdk_bs_unload(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn, void *cb_a
 	cpl.u.bs_basic.cb_fn = cb_fn;
 	cpl.u.bs_basic.cb_arg = cb_arg;
 
-	ctx->seq = bs_sequence_start(bs->md_channel, &cpl);
+	ctx->seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!ctx->seq) {
 		spdk_free(ctx->super);
 		free(ctx);
@@ -5581,7 +5743,7 @@ spdk_bs_set_super(struct spdk_blob_store *bs, spdk_blob_id blobid,
 	cpl.u.bs_basic.cb_fn = cb_fn;
 	cpl.u.bs_basic.cb_arg = cb_arg;
 
-	seq = bs_sequence_start(bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!seq) {
 		spdk_free(ctx->super);
 		free(ctx);
@@ -5804,12 +5966,14 @@ blob_opts_copy(const struct spdk_blob_opts *src, struct spdk_blob_opts *dst)
 	}
 
 	SET_FIELD(use_extent_table);
+	SET_FIELD(esnap_id);
+	SET_FIELD(esnap_id_len);
 
 	dst->opts_size = src->opts_size;
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_blob_opts) == 64, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_blob_opts) == 80, "Incorrect size");
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -5847,15 +6011,15 @@ bs_create_blob(struct spdk_blob_store *bs,
 
 	SPDK_DEBUGLOG(blob, "Creating blob with id %" PRIu64 " at page %u\n", id, page_idx);
 
+	spdk_blob_opts_init(&opts_local, sizeof(opts_local));
+	if (opts) {
+		blob_opts_copy(opts, &opts_local);
+	}
+
 	blob = blob_alloc(bs, id);
 	if (!blob) {
 		rc = -ENOMEM;
 		goto error;
-	}
-
-	spdk_blob_opts_init(&opts_local, sizeof(opts_local));
-	if (opts) {
-		blob_opts_copy(opts, &opts_local);
 	}
 
 	blob->use_extent_table = opts_local.use_extent_table;
@@ -5884,6 +6048,22 @@ bs_create_blob(struct spdk_blob_store *bs,
 
 	blob_set_clear_method(blob, opts_local.clear_method);
 
+	if (opts_local.esnap_id != NULL) {
+		if (opts_local.esnap_id_len > UINT16_MAX) {
+			SPDK_ERRLOG("esnap id length %" PRIu64 "is too long\n",
+				    opts_local.esnap_id_len);
+			goto error;
+
+		}
+		blob_set_thin_provision(blob);
+		blob->invalid_flags |= SPDK_BLOB_EXTERNAL_SNAPSHOT;
+		rc = blob_set_xattr(blob, BLOB_EXTERNAL_SNAPSHOT_ID,
+				    opts_local.esnap_id, opts_local.esnap_id_len, true);
+		if (rc != 0) {
+			goto error;
+		}
+	}
+
 	rc = blob_resize(blob, opts_local.num_clusters);
 	if (rc < 0) {
 		goto error;
@@ -5893,7 +6073,7 @@ bs_create_blob(struct spdk_blob_store *bs,
 	cpl.u.blobid.cb_arg = cb_arg;
 	cpl.u.blobid.blobid = blob->id;
 
-	seq = bs_sequence_start(bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!seq) {
 		rc = -ENOMEM;
 		goto error;
@@ -5903,6 +6083,8 @@ bs_create_blob(struct spdk_blob_store *bs,
 	return;
 
 error:
+	SPDK_ERRLOG("Failed to create blob: %s, size in clusters/size: %lu (clusters)\n",
+		    spdk_strerror(rc), opts_local.num_clusters);
 	if (blob != NULL) {
 		blob_free(blob);
 	}
@@ -6071,6 +6253,30 @@ bs_snapshot_swap_cluster_maps(struct spdk_blob *blob1, struct spdk_blob *blob2)
 	blob2->active.extent_pages = extent_page_temp;
 }
 
+/* Copies an internal xattr */
+static int
+bs_snapshot_copy_xattr(struct spdk_blob *toblob, struct spdk_blob *fromblob, const char *name)
+{
+	const void	*val = NULL;
+	size_t		len;
+	int		bserrno;
+
+	bserrno = blob_get_xattr_value(fromblob, name, &val, &len, true);
+	if (bserrno != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 " missing %s xattr"
+			    BLOB_EXTERNAL_SNAPSHOT_ID " XATTR\n", fromblob->id, name);
+		return bserrno;
+	}
+
+	bserrno = blob_set_xattr(toblob, name, val, len, true);
+	if (bserrno != 0) {
+		SPDK_ERRLOG("could not set %s XATTR on blob 0x%" PRIx64 "\n",
+			    name, toblob->id);
+		return bserrno;
+	}
+	return 0;
+}
+
 static void
 bs_snapshot_origblob_sync_cpl(void *cb_arg, int bserrno)
 {
@@ -6080,6 +6286,10 @@ bs_snapshot_origblob_sync_cpl(void *cb_arg, int bserrno)
 
 	if (bserrno != 0) {
 		bs_snapshot_swap_cluster_maps(newblob, origblob);
+		if (blob_is_esnap_clone(newblob)) {
+			bs_snapshot_copy_xattr(origblob, newblob, BLOB_EXTERNAL_SNAPSHOT_ID);
+			origblob->invalid_flags |= SPDK_BLOB_EXTERNAL_SNAPSHOT;
+		}
 		bs_clone_snapshot_origblob_cleanup(ctx, bserrno);
 		return;
 	}
@@ -6143,6 +6353,25 @@ bs_snapshot_newblob_sync_cpl(void *cb_arg, int bserrno)
 		return;
 	}
 
+	/* Remove the xattr that references an external snapshot */
+	if (blob_is_esnap_clone(origblob)) {
+		origblob->invalid_flags &= ~SPDK_BLOB_EXTERNAL_SNAPSHOT;
+		bserrno = blob_remove_xattr(origblob, BLOB_EXTERNAL_SNAPSHOT_ID, true);
+		if (bserrno != 0) {
+			if (bserrno == -ENOENT) {
+				SPDK_ERRLOG("blob 0x%" PRIx64 " has no " BLOB_EXTERNAL_SNAPSHOT_ID
+					    " xattr to remove\n", origblob->id);
+				assert(false);
+			} else {
+				/* return cluster map back to original */
+				bs_snapshot_swap_cluster_maps(newblob, origblob);
+				blob_set_thin_provision(newblob);
+				bs_clone_snapshot_newblob_cleanup(ctx, bserrno);
+				return;
+			}
+		}
+	}
+
 	bs_blob_list_remove(origblob);
 	origblob->parent_id = newblob->id;
 	/* set clone blob as thin provisioned */
@@ -6169,8 +6398,14 @@ bs_snapshot_freeze_cpl(void *cb_arg, int rc)
 
 	ctx->frozen = true;
 
+	if (blob_is_esnap_clone(origblob)) {
+		/* Clean up any channels associated with the original blob id because future IO will
+		 * perform IO using the snapshot blob_id.
+		 */
+		blob_esnap_destroy_bs_dev_channels(origblob, false, NULL, NULL);
+	}
 	if (newblob->back_bs_dev) {
-		newblob->back_bs_dev->destroy(newblob->back_bs_dev);
+		blob_back_bs_destroy(newblob);
 	}
 	/* set new back_bs_dev for snapshot */
 	newblob->back_bs_dev = origblob->back_bs_dev;
@@ -6179,7 +6414,17 @@ bs_snapshot_freeze_cpl(void *cb_arg, int rc)
 
 	/* inherit parent from original blob if set */
 	newblob->parent_id = origblob->parent_id;
-	if (origblob->parent_id != SPDK_BLOBID_INVALID) {
+	switch (origblob->parent_id) {
+	case SPDK_BLOBID_EXTERNAL_SNAPSHOT:
+		bserrno = bs_snapshot_copy_xattr(newblob, origblob, BLOB_EXTERNAL_SNAPSHOT_ID);
+		if (bserrno != 0) {
+			bs_clone_snapshot_newblob_cleanup(ctx, bserrno);
+			return;
+		}
+		break;
+	case SPDK_BLOBID_INVALID:
+		break;
+	default:
 		/* Set internal xattr for snapshot id */
 		bserrno = blob_set_xattr(newblob, BLOB_SNAPSHOT,
 					 &origblob->parent_id, sizeof(spdk_blob_id), true);
@@ -6467,7 +6712,7 @@ bs_inflate_blob_set_parent_cpl(void *cb_arg, struct spdk_blob *_parent, int bser
 	bs_blob_list_remove(_blob);
 	_blob->parent_id = _parent->id;
 
-	_blob->back_bs_dev->destroy(_blob->back_bs_dev);
+	blob_back_bs_destroy(_blob);
 	_blob->back_bs_dev = bs_create_blob_bs_dev(_parent);
 	bs_blob_list_add(_blob);
 
@@ -6483,11 +6728,19 @@ bs_inflate_blob_done(struct spdk_clone_snapshot_ctx *ctx)
 	if (ctx->allocate_all) {
 		/* remove thin provisioning */
 		bs_blob_list_remove(_blob);
+		if (_blob->parent_id == SPDK_BLOBID_EXTERNAL_SNAPSHOT) {
+			blob_remove_xattr(_blob, BLOB_EXTERNAL_SNAPSHOT_ID, true);
+			_blob->invalid_flags &= ~SPDK_BLOB_EXTERNAL_SNAPSHOT;
+		} else {
+			blob_remove_xattr(_blob, BLOB_SNAPSHOT, true);
+		}
 		_blob->invalid_flags = _blob->invalid_flags & ~SPDK_BLOB_THIN_PROV;
-		_blob->back_bs_dev->destroy(_blob->back_bs_dev);
-		_blob->back_bs_dev = NULL;
+		blob_back_bs_destroy(_blob);
 		_blob->parent_id = SPDK_BLOBID_INVALID;
 	} else {
+		/* For now, esnap clones always have allocate_all set. */
+		assert(!blob_is_esnap_clone(_blob));
+
 		_parent = ((struct spdk_blob_bs_dev *)(_blob->back_bs_dev))->blob;
 		if (_parent->parent_id != SPDK_BLOBID_INVALID) {
 			/* We must change the parent of the inflated blob */
@@ -6498,7 +6751,7 @@ bs_inflate_blob_done(struct spdk_clone_snapshot_ctx *ctx)
 
 		bs_blob_list_remove(_blob);
 		_blob->parent_id = SPDK_BLOBID_INVALID;
-		_blob->back_bs_dev->destroy(_blob->back_bs_dev);
+		blob_back_bs_destroy(_blob);
 		_blob->back_bs_dev = bs_create_zeroes_dev();
 	}
 
@@ -6526,6 +6779,10 @@ bs_cluster_needs_allocation(struct spdk_blob *blob, uint64_t cluster, bool alloc
 	if (blob->parent_id == SPDK_BLOBID_INVALID) {
 		/* Blob have no parent blob */
 		return allocate_all;
+	}
+
+	if (blob->parent_id == SPDK_BLOBID_EXTERNAL_SNAPSHOT) {
+		return true;
 	}
 
 	b = (struct spdk_blob_bs_dev *)blob->back_bs_dev;
@@ -6600,11 +6857,26 @@ bs_inflate_blob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int bserrno)
 
 	_blob->locked_operation_in_progress = true;
 
-	if (!ctx->allocate_all && _blob->parent_id == SPDK_BLOBID_INVALID) {
-		/* This blob have no parent, so we cannot decouple it. */
-		SPDK_ERRLOG("Cannot decouple parent of blob with no parent.\n");
-		bs_clone_snapshot_origblob_cleanup(ctx, -EINVAL);
-		return;
+	switch (_blob->parent_id) {
+	case SPDK_BLOBID_INVALID:
+		if (!ctx->allocate_all) {
+			/* This blob has no parent, so we cannot decouple it. */
+			SPDK_ERRLOG("Cannot decouple parent of blob with no parent.\n");
+			bs_clone_snapshot_origblob_cleanup(ctx, -EINVAL);
+			return;
+		}
+		break;
+	case SPDK_BLOBID_EXTERNAL_SNAPSHOT:
+		/*
+		 * It would be better to rely on back_bs_dev->is_zeroes(), to determine which
+		 * clusters require allocation. Until there is a blobstore consumer that
+		 * uses esnaps with an spdk_bs_dev that implements a useful is_zeroes() it is not
+		 * worth the effort.
+		 */
+		ctx->allocate_all = true;
+		break;
+	default:
+		break;
 	}
 
 	if (spdk_blob_is_thin_provisioned(_blob) == false) {
@@ -7126,7 +7398,13 @@ delete_snapshot_sync_snapshot_cpl(void *cb_arg, int bserrno)
 	snapshot_entry->clone_count--;
 	assert(TAILQ_EMPTY(&snapshot_entry->clones));
 
-	if (ctx->snapshot->parent_id != SPDK_BLOBID_INVALID) {
+	switch (ctx->snapshot->parent_id) {
+	case SPDK_BLOBID_INVALID:
+	case SPDK_BLOBID_EXTERNAL_SNAPSHOT:
+		/* No parent snapshot - just remove clone entry */
+		free(clone_entry);
+		break;
+	default:
 		/* This snapshot is at the same time a clone of another snapshot - we need to
 		 * update parent snapshot (remove current clone, add new one inherited from
 		 * the snapshot that is being removed) */
@@ -7140,9 +7418,6 @@ delete_snapshot_sync_snapshot_cpl(void *cb_arg, int bserrno)
 		TAILQ_INSERT_TAIL(&parent_snapshot_entry->clones, clone_entry, link);
 		TAILQ_REMOVE(&parent_snapshot_entry->clones, snapshot_clone_entry, link);
 		free(snapshot_clone_entry);
-	} else {
-		/* No parent snapshot - just remove clone entry */
-		free(clone_entry);
 	}
 
 	/* Restore md_ro flags */
@@ -7201,11 +7476,34 @@ delete_snapshot_sync_clone_cpl(void *cb_arg, int bserrno)
 static void
 delete_snapshot_update_extent_pages_cpl(struct delete_snapshot_ctx *ctx)
 {
+	int bserrno;
+
 	/* Delete old backing bs_dev from clone (related to snapshot that will be removed) */
-	ctx->clone->back_bs_dev->destroy(ctx->clone->back_bs_dev);
+	blob_back_bs_destroy(ctx->clone);
 
 	/* Set/remove snapshot xattr and switch parent ID and backing bs_dev on clone... */
-	if (ctx->parent_snapshot_entry != NULL) {
+	if (ctx->snapshot->parent_id == SPDK_BLOBID_EXTERNAL_SNAPSHOT) {
+		bserrno = bs_snapshot_copy_xattr(ctx->clone, ctx->snapshot,
+						 BLOB_EXTERNAL_SNAPSHOT_ID);
+		if (bserrno != 0) {
+			ctx->bserrno = bserrno;
+
+			/* Restore snapshot to previous state */
+			bserrno = blob_remove_xattr(ctx->snapshot, SNAPSHOT_PENDING_REMOVAL, true);
+			if (bserrno != 0) {
+				delete_snapshot_cleanup_clone(ctx, bserrno);
+				return;
+			}
+
+			spdk_blob_sync_md(ctx->snapshot, delete_snapshot_cleanup_clone, ctx);
+			return;
+		}
+		ctx->clone->parent_id = SPDK_BLOBID_EXTERNAL_SNAPSHOT;
+		ctx->clone->back_bs_dev = ctx->snapshot->back_bs_dev;
+		/* Do not delete the external snapshot along with this snapshot */
+		ctx->snapshot->back_bs_dev = NULL;
+		ctx->clone->invalid_flags |= SPDK_BLOB_EXTERNAL_SNAPSHOT;
+	} else if (ctx->parent_snapshot_entry != NULL) {
 		/* ...to parent snapshot */
 		ctx->clone->parent_id = ctx->parent_snapshot_entry->id;
 		ctx->clone->back_bs_dev = ctx->snapshot->back_bs_dev;
@@ -7283,6 +7581,20 @@ delete_snapshot_sync_snapshot_xattr_cpl(void *cb_arg, int bserrno)
 }
 
 static void
+delete_snapshot_esnap_channels_destroyed_cb(void *cb_arg, struct spdk_blob *blob, int bserrno)
+{
+	struct delete_snapshot_ctx *ctx = cb_arg;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 ": failed to destroy esnap channels: %d\n",
+			    blob->id, bserrno);
+		/* That error should not stop us from syncing metadata. */
+	}
+
+	spdk_blob_sync_md(ctx->snapshot, delete_snapshot_sync_snapshot_xattr_cpl, ctx);
+}
+
+static void
 delete_snapshot_freeze_io_cb(void *cb_arg, int bserrno)
 {
 	struct delete_snapshot_ctx *ctx = cb_arg;
@@ -7303,6 +7615,13 @@ delete_snapshot_freeze_io_cb(void *cb_arg, int bserrno)
 				      sizeof(spdk_blob_id), true);
 	if (ctx->bserrno != 0) {
 		delete_snapshot_cleanup_clone(ctx, 0);
+		return;
+	}
+
+	if (blob_is_esnap_clone(ctx->snapshot)) {
+		blob_esnap_destroy_bs_dev_channels(ctx->snapshot, false,
+						   delete_snapshot_esnap_channels_destroyed_cb,
+						   ctx);
 		return;
 	}
 
@@ -7524,7 +7843,7 @@ spdk_bs_delete_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 	cpl.u.blob_basic.cb_fn = cb_fn;
 	cpl.u.blob_basic.cb_arg = cb_arg;
 
-	seq = bs_sequence_start(bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!seq) {
 		cb_fn(cb_arg, -ENOMEM);
 		return;
@@ -7579,12 +7898,13 @@ blob_open_opts_copy(const struct spdk_blob_open_opts *src, struct spdk_blob_open
         } \
 
 	SET_FIELD(clear_method);
+	SET_FIELD(esnap_ctx);
 
 	dst->opts_size = src->opts_size;
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_blob_open_opts) == 16, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_blob_open_opts) == 24, "Incorrect size");
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -7637,8 +7957,9 @@ bs_open_blob(struct spdk_blob_store *bs,
 	cpl.u.blob_handle.cb_fn = cb_fn;
 	cpl.u.blob_handle.cb_arg = cb_arg;
 	cpl.u.blob_handle.blob = blob;
+	cpl.u.blob_handle.esnap_ctx = opts_local.esnap_ctx;
 
-	seq = bs_sequence_start(bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!seq) {
 		blob_free(blob);
 		cb_fn(cb_arg, NULL, -ENOMEM);
@@ -7702,7 +8023,7 @@ blob_sync_md(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg)
 	cpl.u.blob_basic.cb_fn = cb_fn;
 	cpl.u.blob_basic.cb_arg = cb_arg;
 
-	seq = bs_sequence_start(blob->bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(blob->bs->md_channel, &cpl);
 	if (!seq) {
 		cb_fn(cb_arg, -ENOMEM);
 		return;
@@ -7822,7 +8143,7 @@ blob_write_extent_page(struct spdk_blob *blob, uint32_t extent, uint64_t cluster
 	cpl.u.blob_basic.cb_fn = cb_fn;
 	cpl.u.blob_basic.cb_arg = cb_arg;
 
-	seq = bs_sequence_start(blob->bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(blob->bs->md_channel, &cpl);
 	if (!seq) {
 		free(ctx);
 		cb_fn(cb_arg, -ENOMEM);
@@ -7940,6 +8261,25 @@ blob_close_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	bs_sequence_finish(seq, bserrno);
 }
 
+static void
+blob_close_esnap_done(void *cb_arg, struct spdk_blob *blob, int bserrno)
+{
+	spdk_bs_sequence_t	*seq = cb_arg;
+
+	if (bserrno != 0) {
+		SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": close failed with error %d\n",
+			      blob->id, bserrno);
+		bs_sequence_finish(seq, bserrno);
+		return;
+	}
+
+	SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": closed, syncing metadata on thread %s\n",
+		      blob->id, spdk_thread_get_name(spdk_get_thread()));
+
+	/* Sync metadata */
+	blob_persist(seq, blob, blob_close_cpl, blob);
+}
+
 void
 spdk_blob_close(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
@@ -7959,9 +8299,14 @@ spdk_blob_close(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_ar
 	cpl.u.blob_basic.cb_fn = cb_fn;
 	cpl.u.blob_basic.cb_arg = cb_arg;
 
-	seq = bs_sequence_start(blob->bs->md_channel, &cpl);
+	seq = bs_sequence_start_bs(blob->bs->md_channel, &cpl);
 	if (!seq) {
 		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	if (blob->open_ref == 1 && blob_is_esnap_clone(blob)) {
+		blob_esnap_destroy_bs_dev_channels(blob, false, blob_close_esnap_done, seq);
 		return;
 	}
 
@@ -7979,6 +8324,7 @@ struct spdk_io_channel *spdk_bs_alloc_io_channel(struct spdk_blob_store *bs)
 void
 spdk_bs_free_io_channel(struct spdk_io_channel *channel)
 {
+	blob_esnap_destroy_bs_channel(spdk_io_channel_get_ctx(channel));
 	spdk_put_io_channel(channel);
 }
 
@@ -8394,6 +8740,12 @@ spdk_blob_is_thin_provisioned(struct spdk_blob *blob)
 	return !!(blob->invalid_flags & SPDK_BLOB_THIN_PROV);
 }
 
+bool
+spdk_blob_is_esnap_clone(const struct spdk_blob *blob)
+{
+	return blob_is_esnap_clone(blob);
+}
+
 static void
 blob_update_clear_method(struct spdk_blob *blob)
 {
@@ -8695,7 +9047,7 @@ spdk_bs_grow(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	cpl.u.bs_handle.cb_arg = cb_arg;
 	cpl.u.bs_handle.bs = bs;
 
-	ctx->seq = bs_sequence_start(bs->md_channel, &cpl);
+	ctx->seq = bs_sequence_start_bs(bs->md_channel, &cpl);
 	if (!ctx->seq) {
 		spdk_free(ctx->super);
 		free(ctx);
@@ -8710,4 +9062,294 @@ spdk_bs_grow(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 			     bs_grow_load_super_cpl, ctx);
 }
 
+int
+spdk_blob_get_esnap_id(struct spdk_blob *blob, const void **id, size_t *len)
+{
+	if (!blob_is_esnap_clone(blob)) {
+		return -EINVAL;
+	}
+
+	return blob_get_xattr_value(blob, BLOB_EXTERNAL_SNAPSHOT_ID, id, len, true);
+}
+
+struct spdk_io_channel *
+blob_esnap_get_io_channel(struct spdk_io_channel *ch, struct spdk_blob *blob)
+{
+	struct spdk_bs_channel		*bs_channel = spdk_io_channel_get_ctx(ch);
+	struct spdk_bs_dev		*bs_dev = blob->back_bs_dev;
+	struct blob_esnap_channel	find = {};
+	struct blob_esnap_channel	*esnap_channel, *existing;
+
+	find.blob_id = blob->id;
+	esnap_channel = RB_FIND(blob_esnap_channel_tree, &bs_channel->esnap_channels, &find);
+	if (spdk_likely(esnap_channel != NULL)) {
+		SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": using cached channel on thread %s\n",
+			      blob->id, spdk_thread_get_name(spdk_get_thread()));
+		return esnap_channel->channel;
+	}
+
+	SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": allocating channel on thread %s\n",
+		      blob->id, spdk_thread_get_name(spdk_get_thread()));
+
+	esnap_channel = calloc(1, sizeof(*esnap_channel));
+	if (esnap_channel == NULL) {
+		SPDK_NOTICELOG("blob 0x%" PRIx64 " channel allocation failed: no memory\n",
+			       find.blob_id);
+		return NULL;
+	}
+	esnap_channel->channel = bs_dev->create_channel(bs_dev);
+	if (esnap_channel->channel == NULL) {
+		SPDK_NOTICELOG("blob 0x%" PRIx64 " back channel allocation failed\n", blob->id);
+		free(esnap_channel);
+		return NULL;
+	}
+	esnap_channel->blob_id = find.blob_id;
+	existing = RB_INSERT(blob_esnap_channel_tree, &bs_channel->esnap_channels, esnap_channel);
+	if (spdk_unlikely(existing != NULL)) {
+		/*
+		 * This should be unreachable: all modifications to this tree happen on this thread.
+		 */
+		SPDK_ERRLOG("blob 0x%" PRIx64 "lost race to allocate a channel\n", find.blob_id);
+		assert(false);
+
+		bs_dev->destroy_channel(bs_dev, esnap_channel->channel);
+		free(esnap_channel);
+
+		return existing->channel;
+	}
+
+	return esnap_channel->channel;
+}
+
+static int
+blob_esnap_channel_compare(struct blob_esnap_channel *c1, struct blob_esnap_channel *c2)
+{
+	return (c1->blob_id < c2->blob_id ? -1 : c1->blob_id > c2->blob_id);
+}
+
+struct blob_esnap_destroy_ctx {
+	spdk_blob_op_with_handle_complete	cb_fn;
+	void					*cb_arg;
+	struct spdk_blob			*blob;
+	struct spdk_bs_dev			*back_bs_dev;
+	bool					abort_io;
+};
+
+static void
+blob_esnap_destroy_channels_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct blob_esnap_destroy_ctx	*ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_blob		*blob = ctx->blob;
+	struct spdk_blob_store		*bs = blob->bs;
+
+	SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": done destroying channels for this blob\n",
+		      blob->id);
+
+	if (ctx->cb_fn != NULL) {
+		ctx->cb_fn(ctx->cb_arg, blob, status);
+	}
+	free(ctx);
+
+	bs->esnap_channels_unloading--;
+	if (bs->esnap_channels_unloading == 0 && bs->esnap_unload_cb_fn != NULL) {
+		spdk_bs_unload(bs, bs->esnap_unload_cb_fn, bs->esnap_unload_cb_arg);
+	}
+}
+
+static void
+blob_esnap_destroy_one_channel(struct spdk_io_channel_iter *i)
+{
+	struct blob_esnap_destroy_ctx	*ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_blob		*blob = ctx->blob;
+	struct spdk_bs_dev		*bs_dev = ctx->back_bs_dev;
+	struct spdk_io_channel		*channel = spdk_io_channel_iter_get_channel(i);
+	struct spdk_bs_channel		*bs_channel = spdk_io_channel_get_ctx(channel);
+	struct blob_esnap_channel	*esnap_channel;
+	struct blob_esnap_channel	find = {};
+
+	assert(spdk_get_thread() == spdk_io_channel_get_thread(channel));
+
+	find.blob_id = blob->id;
+	esnap_channel = RB_FIND(blob_esnap_channel_tree, &bs_channel->esnap_channels, &find);
+	if (esnap_channel != NULL) {
+		SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": destroying channel on thread %s\n",
+			      blob->id, spdk_thread_get_name(spdk_get_thread()));
+		RB_REMOVE(blob_esnap_channel_tree, &bs_channel->esnap_channels, esnap_channel);
+
+		if (ctx->abort_io) {
+			spdk_bs_user_op_t *op, *tmp;
+
+			TAILQ_FOREACH_SAFE(op, &bs_channel->queued_io, link, tmp) {
+				if (op->back_channel == esnap_channel->channel) {
+					TAILQ_REMOVE(&bs_channel->queued_io, op, link);
+					bs_user_op_abort(op, -EIO);
+				}
+			}
+		}
+
+		bs_dev->destroy_channel(bs_dev, esnap_channel->channel);
+		free(esnap_channel);
+	}
+
+	spdk_for_each_channel_continue(i, 0);
+}
+
+/*
+ * Destroy the channels for a specific blob on each thread with a blobstore channel. This should be
+ * used when closing an esnap clone blob and after decoupling from the parent.
+ */
+static void
+blob_esnap_destroy_bs_dev_channels(struct spdk_blob *blob, bool abort_io,
+				   spdk_blob_op_with_handle_complete cb_fn, void *cb_arg)
+{
+	struct blob_esnap_destroy_ctx	*ctx;
+
+	if (!blob_is_esnap_clone(blob) || blob->back_bs_dev == NULL) {
+		if (cb_fn != NULL) {
+			cb_fn(cb_arg, blob, 0);
+		}
+		return;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		if (cb_fn != NULL) {
+			cb_fn(cb_arg, blob, -ENOMEM);
+		}
+		return;
+	}
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+	ctx->blob = blob;
+	ctx->back_bs_dev = blob->back_bs_dev;
+	ctx->abort_io = abort_io;
+
+	SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64 ": destroying channels for this blob\n",
+		      blob->id);
+
+	blob->bs->esnap_channels_unloading++;
+	spdk_for_each_channel(blob->bs, blob_esnap_destroy_one_channel, ctx,
+			      blob_esnap_destroy_channels_done);
+}
+
+/*
+ * Destroy all bs_dev channels on a specific blobstore channel. This should be used when a
+ * bs_channel is destroyed.
+ */
+static void
+blob_esnap_destroy_bs_channel(struct spdk_bs_channel *ch)
+{
+	struct blob_esnap_channel *esnap_channel, *esnap_channel_tmp;
+
+	assert(spdk_get_thread() == spdk_io_channel_get_thread(spdk_io_channel_from_ctx(ch)));
+
+	SPDK_DEBUGLOG(blob_esnap, "destroying channels on thread %s\n",
+		      spdk_thread_get_name(spdk_get_thread()));
+	RB_FOREACH_SAFE(esnap_channel, blob_esnap_channel_tree, &ch->esnap_channels,
+			esnap_channel_tmp) {
+		SPDK_DEBUGLOG(blob_esnap, "blob 0x%" PRIx64
+			      ": destroying one channel in thread %s\n",
+			      esnap_channel->blob_id, spdk_thread_get_name(spdk_get_thread()));
+		RB_REMOVE(blob_esnap_channel_tree, &ch->esnap_channels, esnap_channel);
+		spdk_put_io_channel(esnap_channel->channel);
+		free(esnap_channel);
+	}
+	SPDK_DEBUGLOG(blob_esnap, "done destroying channels on thread %s\n",
+		      spdk_thread_get_name(spdk_get_thread()));
+}
+
+struct set_bs_dev_ctx {
+	struct spdk_blob	*blob;
+	struct spdk_bs_dev	*back_bs_dev;
+	spdk_blob_op_complete	cb_fn;
+	void			*cb_arg;
+	int			bserrno;
+};
+
+static void
+blob_set_back_bs_dev_done(void *_ctx, int bserrno)
+{
+	struct set_bs_dev_ctx	*ctx = _ctx;
+
+	if (bserrno != 0) {
+		/* Even though the unfreeze failed, the update may have succeed. */
+		SPDK_ERRLOG("blob 0x%" PRIx64 ": unfreeze failed with error %d\n", ctx->blob->id,
+			    bserrno);
+	}
+	ctx->cb_fn(ctx->cb_arg, ctx->bserrno);
+	free(ctx);
+}
+
+static void
+blob_frozen_set_back_bs_dev(void *_ctx, struct spdk_blob *blob, int bserrno)
+{
+	struct set_bs_dev_ctx	*ctx = _ctx;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 ": failed to release old back_bs_dev with error %d\n",
+			    blob->id, bserrno);
+		ctx->bserrno = bserrno;
+		blob_unfreeze_io(blob, blob_set_back_bs_dev_done, ctx);
+		return;
+	}
+
+	if (blob->back_bs_dev != NULL) {
+		blob->back_bs_dev->destroy(blob->back_bs_dev);
+	}
+
+	SPDK_NOTICELOG("blob 0x%" PRIx64 ": hotplugged back_bs_dev\n", blob->id);
+	blob->back_bs_dev = ctx->back_bs_dev;
+	ctx->bserrno = 0;
+
+	blob_unfreeze_io(blob, blob_set_back_bs_dev_done, ctx);
+}
+
+static void
+blob_frozen_destroy_esnap_channels(void *_ctx, int bserrno)
+{
+	struct set_bs_dev_ctx	*ctx = _ctx;
+	struct spdk_blob	*blob = ctx->blob;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 ": failed to freeze with error %d\n", blob->id,
+			    bserrno);
+		ctx->cb_fn(ctx->cb_arg, bserrno);
+		free(ctx);
+		return;
+	}
+
+	/*
+	 * This does not prevent future reads from the esnap device because any future IO will
+	 * lazily create a new esnap IO channel.
+	 */
+	blob_esnap_destroy_bs_dev_channels(blob, true, blob_frozen_set_back_bs_dev, ctx);
+}
+
+void
+spdk_blob_set_esnap_bs_dev(struct spdk_blob *blob, struct spdk_bs_dev *back_bs_dev,
+			   spdk_blob_op_complete cb_fn, void *cb_arg)
+{
+	struct set_bs_dev_ctx	*ctx;
+
+	if (!blob_is_esnap_clone(blob)) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 ": not an esnap clone\n", blob->id);
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 ": out of memory while setting back_bs_dev\n",
+			    blob->id);
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+	ctx->back_bs_dev = back_bs_dev;
+	ctx->blob = blob;
+	blob_freeze_io(blob, blob_frozen_destroy_esnap_channels, ctx);
+}
+
 SPDK_LOG_REGISTER_COMPONENT(blob)
+SPDK_LOG_REGISTER_COMPONENT(blob_esnap)

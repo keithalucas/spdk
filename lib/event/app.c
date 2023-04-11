@@ -47,7 +47,6 @@ struct spdk_app {
 static struct spdk_app g_spdk_app;
 static spdk_msg_fn g_start_fn = NULL;
 static void *g_start_arg = NULL;
-static struct spdk_thread *g_app_thread = NULL;
 static bool g_delay_subsystem_init = false;
 static bool g_shutdown_sig_received = false;
 static char *g_executable_name;
@@ -146,7 +145,7 @@ app_start_shutdown(void *ctx)
 void
 spdk_app_start_shutdown(void)
 {
-	spdk_thread_send_critical_msg(g_app_thread, app_start_shutdown);
+	spdk_thread_send_critical_msg(spdk_thread_get_app_thread(), app_start_shutdown);
 }
 
 static void
@@ -259,7 +258,7 @@ app_setup_signal_handlers(struct spdk_app_opts *opts)
 static void
 app_start_application(void)
 {
-	assert(spdk_get_thread() == g_app_thread);
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
 	g_start_fn(g_start_arg);
 }
@@ -531,20 +530,39 @@ app_copy_opts(struct spdk_app_opts *opts, struct spdk_app_opts *opts_user, size_
 #undef SET_FIELD
 }
 
-static void
-unclaim_cpu_cores(void)
+static int
+unclaim_cpu_cores(uint32_t *failed_core)
 {
 	char core_name[40];
 	uint32_t i;
+	int rc;
 
 	for (i = 0; i < MAX_CPU_CORES; i++) {
 		if (g_core_locks[i] != -1) {
 			snprintf(core_name, sizeof(core_name), "/var/tmp/spdk_cpu_lock_%03d", i);
-			close(g_core_locks[i]);
+			rc = close(g_core_locks[i]);
+			if (rc) {
+				SPDK_ERRLOG("Failed to close lock fd for core %d, errno: %d\n", i, errno);
+				goto error;
+			}
+
 			g_core_locks[i] = -1;
-			unlink(core_name);
+			rc = unlink(core_name);
+			if (rc) {
+				SPDK_ERRLOG("Failed to unlink lock fd for core %d, errno: %d\n", i, errno);
+				goto error;
+			}
 		}
 	}
+
+	return 0;
+
+error:
+	if (failed_core != NULL) {
+		/* Set number of core we failed to claim. */
+		*failed_core = i;
+	}
+	return -1;
 }
 
 static int
@@ -613,7 +631,7 @@ error:
 		/* Set number of core we failed to claim. */
 		*failed_core = core;
 	}
-	unclaim_cpu_cores();
+	unclaim_cpu_cores(NULL);
 	return -1;
 }
 
@@ -718,10 +736,9 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 
 	spdk_cpuset_set_cpu(&tmp_cpumask, spdk_env_get_current_core(), true);
 
-	/* Now that the reactors have been initialized, we can create an
-	 * initialization thread. */
-	g_app_thread = spdk_thread_create("app_thread", &tmp_cpumask);
-	if (!g_app_thread) {
+	/* Now that the reactors have been initialized, we can create the app thread. */
+	spdk_thread_create("app_thread", &tmp_cpumask);
+	if (!spdk_thread_get_app_thread()) {
 		SPDK_ERRLOG("Unable to create an spdk_thread for initialization\n");
 		return 1;
 	}
@@ -748,7 +765,7 @@ spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 	g_start_fn = start_fn;
 	g_start_arg = arg1;
 
-	spdk_thread_send_msg(g_app_thread, bootstrap_fn, NULL);
+	spdk_thread_send_msg(spdk_thread_get_app_thread(), bootstrap_fn, NULL);
 
 	/* This blocks until spdk_app_stop is called */
 	spdk_reactors_start();
@@ -765,14 +782,14 @@ spdk_app_fini(void)
 	spdk_reactors_fini();
 	spdk_env_fini();
 	spdk_log_close();
-	unclaim_cpu_cores();
+	unclaim_cpu_cores(NULL);
 }
 
 static void
 _start_subsystem_fini(void *arg1)
 {
 	if (g_scheduling_in_progress) {
-		spdk_thread_send_msg(g_app_thread, _start_subsystem_fini, NULL);
+		spdk_thread_send_msg(spdk_thread_get_app_thread(), _start_subsystem_fini, NULL);
 		return;
 	}
 
@@ -823,13 +840,7 @@ spdk_app_stop(int rc)
 	 * We want to run spdk_subsystem_fini() from the same thread where spdk_subsystem_init()
 	 * was called.
 	 */
-	spdk_thread_send_msg(g_app_thread, app_stop, (void *)(intptr_t)rc);
-}
-
-struct spdk_thread *
-_spdk_get_app_thread(void)
-{
-	return g_app_thread;
+	spdk_thread_send_msg(spdk_thread_get_app_thread(), app_stop, (void *)(intptr_t)rc);
 }
 
 static void
@@ -879,6 +890,7 @@ usage(void (*app_usage)(void))
 	printf("     --base-virtaddr <addr>      the base virtual address for DPDK (default: 0x200000000000)\n");
 	printf("     --num-trace-entries <num>   number of trace entries for each core, must be power of 2, setting 0 to disable trace (default %d)\n",
 	       SPDK_APP_DEFAULT_NUM_TRACE_ENTRIES);
+	printf("                                 Tracepoints vary in size and can use more than one trace entry.\n");
 	printf("     --rpcs-allowed	   comma-separated list of permitted RPCS\n");
 	printf("     --env-context         Opaque context for use of the env implementation\n");
 	printf("     --vfio-vf-token       VF token (UUID) shared between SR-IOV PF and VFs for vfio_pci driver\n");
@@ -1209,7 +1221,7 @@ rpc_framework_start_init_cpl(int rc, void *arg1)
 {
 	struct spdk_jsonrpc_request *request = arg1;
 
-	assert(spdk_get_thread() == g_app_thread);
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
@@ -1282,6 +1294,10 @@ static void
 rpc_framework_disable_cpumask_locks(struct spdk_jsonrpc_request *request,
 				    const struct spdk_json_val *params)
 {
+	char msg[128];
+	int rc;
+	uint32_t failed_core;
+
 	if (params != NULL) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 						 "framework_disable_cpumask_locks"
@@ -1289,7 +1305,13 @@ rpc_framework_disable_cpumask_locks(struct spdk_jsonrpc_request *request,
 		return;
 	}
 
-	unclaim_cpu_cores();
+	rc = unclaim_cpu_cores(&failed_core);
+	if (rc) {
+		snprintf(msg, sizeof(msg), "Failed to unclaim CPU core: %" PRIu32, failed_core);
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, msg);
+		return;
+	}
+
 	spdk_jsonrpc_send_bool_response(request, true);
 }
 SPDK_RPC_REGISTER("framework_disable_cpumask_locks", rpc_framework_disable_cpumask_locks,

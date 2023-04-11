@@ -51,6 +51,10 @@ DEFINE_RETURN_MOCK(spdk_nvme_ctrlr_get_memory_domains, int);
 
 DEFINE_STUB_V(spdk_jsonrpc_send_error_response, (struct spdk_jsonrpc_request *request,
 		int error_code, const char *msg));
+DEFINE_STUB(spdk_jsonrpc_begin_result, struct spdk_json_write_ctx *,
+	    (struct spdk_jsonrpc_request *request), NULL);
+DEFINE_STUB_V(spdk_jsonrpc_end_result,
+	      (struct spdk_jsonrpc_request *request, struct spdk_json_write_ctx *w));
 
 DEFINE_STUB_V(spdk_nvme_transport_get_opts, (struct spdk_nvme_transport_opts *opts,
 		size_t opts_size));
@@ -2315,7 +2319,6 @@ test_submit_nvme_cmd(void)
 	struct nvme_bdev *bdev;
 	struct spdk_bdev_io *bdev_io;
 	struct spdk_io_channel *ch;
-	struct spdk_bdev_ext_io_opts ext_io_opts = {};
 	int rc;
 
 	memset(attached_names, 0, sizeof(char *) * STRING_SIZE);
@@ -2364,18 +2367,13 @@ test_submit_nvme_cmd(void)
 
 	ut_test_submit_fused_nvme_cmd(ch, bdev_io);
 
-	/* Verify that ext NVME API is called if bdev_io ext_opts is set */
-	bdev_io->u.bdev.ext_opts = &ext_io_opts;
+	/* Verify that ext NVME API is called when data is described by memory domain  */
 	g_ut_readv_ext_called = false;
+	bdev_io->u.bdev.memory_domain = (void *)0xdeadbeef;
 	ut_test_submit_nvme_cmd(ch, bdev_io, SPDK_BDEV_IO_TYPE_READ);
 	CU_ASSERT(g_ut_readv_ext_called == true);
 	g_ut_readv_ext_called = false;
-
-	g_ut_writev_ext_called = false;
-	ut_test_submit_nvme_cmd(ch, bdev_io, SPDK_BDEV_IO_TYPE_WRITE);
-	CU_ASSERT(g_ut_writev_ext_called == true);
-	g_ut_writev_ext_called = false;
-	bdev_io->u.bdev.ext_opts = NULL;
+	bdev_io->u.bdev.memory_domain = NULL;
 
 	ut_test_submit_admin_cmd(ch, bdev_io, ctrlr);
 
@@ -5400,9 +5398,6 @@ test_retry_failover_ctrlr(void)
 	CU_ASSERT(nvme_ctrlr->reconnect_delay_timer != NULL);
 	CU_ASSERT(nvme_ctrlr->reconnect_is_delayed == true);
 	CU_ASSERT(path_id1->is_failed == true);
-
-	CU_ASSERT(nvme_ctrlr->reconnect_delay_timer != NULL);
-	CU_ASSERT(nvme_ctrlr->reconnect_is_delayed == true);
 
 	path_id2 = ut_get_path_id_by_trid(nvme_ctrlr, &trid2);
 	SPDK_CU_ASSERT_FATAL(path_id2 != NULL);

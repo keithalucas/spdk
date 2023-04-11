@@ -35,8 +35,10 @@ class Server:
         self.username = general_config["username"]
         self.password = general_config["password"]
         self.transport = general_config["transport"].lower()
+        self.skip_spdk_install = general_config.get('skip_spdk_install', False)
         self.nic_ips = server_config["nic_ips"]
         self.mode = server_config["mode"]
+        self.irdma_roce_enable = False
 
         self.log = logging.getLogger(self.name)
 
@@ -63,6 +65,8 @@ class Server:
             self.irq_settings.update(server_config["irq_settings"])
         if "tuned_profile" in server_config:
             self.tuned_profile = server_config["tuned_profile"]
+        if "irdma_roce_enable" in general_config:
+            self.irdma_roce_enable = general_config["irdma_roce_enable"]
 
         if not re.match(r'^[A-Za-z0-9\-]+$', name):
             self.log.info("Please use a name which contains only letters, numbers or dashes")
@@ -126,11 +130,40 @@ class Server:
         self.configure_cpu_governor()
         self.configure_irq_affinity(**self.irq_settings)
 
+    RDMA_PROTOCOL_IWARP = 0
+    RDMA_PROTOCOL_ROCE = 1
+    RDMA_PROTOCOL_UNKNOWN = -1
+
+    def check_rdma_protocol(self):
+        try:
+            roce_ena = self.exec_cmd(["cat", "/sys/module/irdma/parameters/roce_ena"])
+            roce_ena = roce_ena.strip()
+            if roce_ena == "0":
+                return self.RDMA_PROTOCOL_IWARP
+            else:
+                return self.RDMA_PROTOCOL_ROCE
+        except CalledProcessError as e:
+            self.log.error("ERROR: failed to check RDMA protocol!")
+            self.log.error("%s resulted in error: %s" % (e.cmd, e.output))
+            return self.RDMA_PROTOCOL_UNKNOWN
+
     def load_drivers(self):
         self.log.info("Loading drivers")
         self.exec_cmd(["sudo", "modprobe", "-a",
                        "nvme-%s" % self.transport,
                        "nvmet-%s" % self.transport])
+        current_mode = self.check_rdma_protocol()
+        if current_mode == self.RDMA_PROTOCOL_UNKNOWN:
+            self.log.error("ERROR: failed to check RDMA protocol mode")
+            return
+        if self.irdma_roce_enable and current_mode == self.RDMA_PROTOCOL_IWARP:
+            self.reload_driver("irdma", "roce_ena=1")
+            self.log.info("Loaded irdma driver with RoCE enabled")
+        elif self.irdma_roce_enable and current_mode == self.RDMA_PROTOCOL_ROCE:
+            self.log.info("Leaving irdma driver with RoCE enabled")
+        else:
+            self.reload_driver("irdma", "roce_ena=0")
+            self.log.info("Loaded irdma driver with iWARP enabled")
 
     def configure_adq(self):
         self.adq_load_modules()
@@ -200,10 +233,11 @@ class Server:
             self.log.info(xps_cmd)
             self.exec_cmd(xps_cmd)
 
-    def reload_driver(self, driver):
+    def reload_driver(self, driver, *modprobe_args):
+
         try:
             self.exec_cmd(["sudo", "rmmod", driver])
-            self.exec_cmd(["sudo", "modprobe", driver])
+            self.exec_cmd(["sudo", "modprobe", driver, *modprobe_args])
         except CalledProcessError as e:
             self.log.error("ERROR: failed to reload %s module!" % driver)
             self.log.error("%s resulted in error: %s" % (e.cmd, e.output))
@@ -496,7 +530,7 @@ class Target(Server):
         self.spdk_dir = os.path.abspath(os.path.join(self.script_dir, "../../../"))
         self.set_local_nic_info(self.set_local_nic_info_helper())
 
-        if "skip_spdk_install" not in general_config or general_config["skip_spdk_install"] is False:
+        if self.skip_spdk_install is False:
             self.zip_spdk_sources(self.spdk_dir, "/tmp/spdk.zip")
 
         self.configure_system()
@@ -695,8 +729,9 @@ class Initiator(Server):
         self.exec_cmd(["mkdir", "-p", "%s" % self.spdk_dir])
         self._nics_json_obj = json.loads(self.exec_cmd(["ip", "-j", "address", "show"]))
 
-        if "skip_spdk_install" not in general_config or general_config["skip_spdk_install"] is False:
+        if self.skip_spdk_install is False:
             self.copy_spdk("/tmp/spdk.zip")
+
         self.set_local_nic_info(self.set_local_nic_info_helper())
         self.set_cpu_frequency()
         self.configure_system()
@@ -1458,7 +1493,7 @@ class SPDKInitiator(Initiator):
     def __init__(self, name, general_config, initiator_config):
         super().__init__(name, general_config, initiator_config)
 
-        if "skip_spdk_install" not in general_config or general_config["skip_spdk_install"] is False:
+        if self.skip_spdk_install is False:
             self.install_spdk()
 
         # Optional fields

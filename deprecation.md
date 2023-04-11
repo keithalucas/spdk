@@ -24,14 +24,6 @@ The tags can be matched with the level 4 headers below.
 PMDK is no longer supported and integrations with it in SPDK are now deprecated, and will be removed in SPDK 23.05.
 Please see: [UPDATE ON PMDK AND OUR LONG TERM SUPPORT STRATEGY](https://pmem.io/blog/2022/11/update-on-pmdk-and-our-long-term-support-strategy/).
 
-#### `accel_flag_persistent`
-
-Deprecated `ACCEL_FLAG_PERSISTENT` flag in `accel_sw` accel framework module, it will be removed in SPDK 23.05.
-
-#### `bdev_pmem`
-
-Deprecated `bdev_pmem` based on libpmemblk, it will be removed in SPDK 23.05.
-
 #### `libreduce_pm_file`
 
 Reduce library will no longer depend on libpmem. `pm_file_dir` parameter in `spdk_reduce_vol_init()`
@@ -48,8 +40,11 @@ VTune integration is in now deprecated and will be removed in SPDK 23.05.
 
 #### `bdev_ocf`
 
-The Open CAS Framework (OCF) integration via bdev module and env_ocf is now deprecated
-and will be removed in SPDK 23.05.
+The Open CAS Framework (OCF) integration via bdev module and env_ocf is currently marked
+deprecated due to discontinued support from Intel. However, Huawei is working to pick up
+support for these components, and the OCF project in general. This code will definitely
+remain in SPDK 23.05 release, in fact it is likely deprecation notice will be removed by
+then.
 
 ### nvme
 
@@ -72,3 +67,12 @@ See GitHub issue [2801](https://github.com/spdk/spdk/issues/2801) for additional
 
 New SPDK partition types should use GUID `6527994e-2c5a-4eec-9613-8f5944074e8b` which will create
 a bdev of the correct size.
+
+### lvol
+
+#### `vbdev_lvol_rpc_req_size`
+
+Param `size` in rpc commands `rpc_bdev_lvol_create` and `rpc_bdev_lvol_resize` is deprecated and
+replace by `size_in_mib`.
+
+See GitHub issue [2346](https://github.com/spdk/spdk/issues/2346) for additional details.

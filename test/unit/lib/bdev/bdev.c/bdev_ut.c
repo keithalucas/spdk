@@ -21,9 +21,20 @@ DEFINE_STUB(spdk_memory_domain_get_dma_device_id, const char *, (struct spdk_mem
 	    "test_domain");
 DEFINE_STUB(spdk_memory_domain_get_dma_device_type, enum spdk_dma_device_type,
 	    (struct spdk_memory_domain *domain), 0);
+DEFINE_STUB(spdk_accel_sequence_finish, int,
+	    (struct spdk_accel_sequence *seq, spdk_accel_completion_cb cb_fn, void *cb_arg), 0);
+DEFINE_STUB_V(spdk_accel_sequence_abort, (struct spdk_accel_sequence *seq));
+DEFINE_STUB_V(spdk_accel_sequence_reverse, (struct spdk_accel_sequence *seq));
+DEFINE_STUB(spdk_accel_append_copy, int,
+	    (struct spdk_accel_sequence **seq, struct spdk_io_channel *ch, struct iovec *dst_iovs,
+	     uint32_t dst_iovcnt, struct spdk_memory_domain *dst_domain, void *dst_domain_ctx,
+	     struct iovec *src_iovs, uint32_t src_iovcnt, struct spdk_memory_domain *src_domain,
+	     void *src_domain_ctx, int flags, spdk_accel_step_cb cb_fn, void *cb_arg), 0);
+DEFINE_STUB(spdk_accel_get_memory_domain, struct spdk_memory_domain *, (void), NULL);
 
 static bool g_memory_domain_pull_data_called;
 static bool g_memory_domain_push_data_called;
+static int g_accel_io_device;
 
 DEFINE_RETURN_MOCK(spdk_memory_domain_pull_data, int);
 int
@@ -49,6 +60,12 @@ spdk_memory_domain_push_data(struct spdk_memory_domain *dst_domain, void *dst_do
 	return 0;
 }
 
+struct spdk_io_channel *
+spdk_accel_get_io_channel(void)
+{
+	return spdk_get_io_channel(&g_accel_io_device);
+}
+
 int g_status;
 int g_count;
 enum spdk_bdev_event_type g_event_type1;
@@ -66,14 +83,29 @@ spdk_scsi_nvme_translate(const struct spdk_bdev_io *bdev_io,
 }
 
 static int
-null_init(void)
+ut_accel_ch_create_cb(void *io_device, void *ctx)
 {
 	return 0;
 }
 
-static int
-null_clean(void)
+static void
+ut_accel_ch_destroy_cb(void *io_device, void *ctx)
 {
+}
+
+static int
+ut_bdev_setup(void)
+{
+	spdk_io_device_register(&g_accel_io_device, ut_accel_ch_create_cb,
+				ut_accel_ch_destroy_cb, 0, NULL);
+	return 0;
+}
+
+static int
+ut_bdev_teardown(void)
+{
+	spdk_io_device_unregister(&g_accel_io_device, NULL);
+
 	return 0;
 }
 
@@ -91,8 +123,6 @@ struct ut_expected_io {
 	int				iovcnt;
 	struct iovec			iov[SPDK_BDEV_IO_NUM_CHILD_IOV];
 	void				*md_buf;
-	struct spdk_bdev_ext_io_opts	*ext_io_opts;
-	bool				copy_opts;
 	TAILQ_ENTRY(ut_expected_io)	link;
 };
 
@@ -282,25 +312,6 @@ stub_submit_request(struct spdk_io_channel *_ch, struct spdk_bdev_io *bdev_io)
 
 	if (expected_io->md_buf != NULL) {
 		CU_ASSERT(expected_io->md_buf == bdev_io->u.bdev.md_buf);
-		if (bdev_io->u.bdev.ext_opts) {
-			CU_ASSERT(expected_io->md_buf == bdev_io->u.bdev.ext_opts->metadata);
-		}
-	}
-
-	if (expected_io->copy_opts) {
-		if (expected_io->ext_io_opts) {
-			/* opts are not NULL so it should have been copied */
-			CU_ASSERT(expected_io->ext_io_opts != bdev_io->u.bdev.ext_opts);
-			CU_ASSERT(bdev_io->u.bdev.ext_opts == &bdev_io->internal.ext_opts_copy);
-			/* internal opts always points to opts passed */
-			CU_ASSERT(expected_io->ext_io_opts == bdev_io->internal.ext_opts);
-		} else {
-			/* passed opts was NULL so we expect bdev_io opts to be NULL */
-			CU_ASSERT(bdev_io->u.bdev.ext_opts == NULL);
-		}
-	} else {
-		/* opts were not copied so they should be equal */
-		CU_ASSERT(expected_io->ext_io_opts == bdev_io->u.bdev.ext_opts);
 	}
 
 	if (expected_io->length == 0) {
@@ -1170,12 +1181,6 @@ bdev_io_types_test(void)
 	CU_ASSERT(rc == -ENOTSUP);
 	ut_enable_io_type(SPDK_BDEV_IO_TYPE_WRITE_ZEROES, true);
 	ut_enable_io_type(SPDK_BDEV_IO_TYPE_WRITE, true);
-
-	/* COPY is not supported */
-	ut_enable_io_type(SPDK_BDEV_IO_TYPE_COPY, false);
-	rc = spdk_bdev_copy_blocks(desc, io_ch, 128, 0, 128, io_done, NULL);
-	CU_ASSERT(rc == -ENOTSUP);
-	ut_enable_io_type(SPDK_BDEV_IO_TYPE_COPY, true);
 
 	/* NVME_IO, NVME_IO_MD and NVME_ADMIN are not supported */
 	ut_enable_io_type(SPDK_BDEV_IO_TYPE_NVME_IO, false);
@@ -5555,7 +5560,6 @@ _bdev_io_ext(struct spdk_bdev_ext_io_opts *ext_io_opts)
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 32, 14, 1);
 	if (ext_io_opts) {
 		expected_io->md_buf = ext_io_opts->metadata;
-		expected_io->ext_io_opts = ext_io_opts;
 	}
 	ut_expected_io_set_iov(expected_io, 0, iov.iov_base, iov.iov_len);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
@@ -5573,7 +5577,6 @@ _bdev_io_ext(struct spdk_bdev_ext_io_opts *ext_io_opts)
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 32, 14, 1);
 	if (ext_io_opts) {
 		expected_io->md_buf = ext_io_opts->metadata;
-		expected_io->ext_io_opts = ext_io_opts;
 	}
 	ut_expected_io_set_iov(expected_io, 0, iov.iov_base, iov.iov_len);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
@@ -5711,15 +5714,11 @@ bdev_io_ext_split(void)
 	/* read */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 14, 2, 1);
 	expected_io->md_buf = ext_io_opts.metadata;
-	expected_io->ext_io_opts = &ext_io_opts;
-	expected_io->copy_opts = true;
 	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 2 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 16, 6, 1);
 	expected_io->md_buf = ext_io_opts.metadata + 2 * 8;
-	expected_io->ext_io_opts = &ext_io_opts;
-	expected_io->copy_opts = true;
 	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 2 * 512), 6 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
@@ -5736,15 +5735,11 @@ bdev_io_ext_split(void)
 	g_io_done = false;
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 14, 2, 1);
 	expected_io->md_buf = ext_io_opts.metadata;
-	expected_io->ext_io_opts = &ext_io_opts;
-	expected_io->copy_opts = true;
 	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 2 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 16, 6, 1);
 	expected_io->md_buf = ext_io_opts.metadata + 2 * 8;
-	expected_io->ext_io_opts = &ext_io_opts;
-	expected_io->copy_opts = true;
 	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 2 * 512), 6 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
@@ -5799,8 +5794,6 @@ bdev_io_ext_bounce_buffer(void)
 	g_io_done = false;
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 32, 14, 1);
 	ut_expected_io_set_iov(expected_io, 0, iov.iov_base, iov.iov_len);
-	expected_io->ext_io_opts = &ext_io_opts;
-	expected_io->copy_opts = true;
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	rc = spdk_bdev_readv_blocks_ext(desc, io_ch, &iov, 1, 32, 14, io_done, NULL, &ext_io_opts);
@@ -5816,8 +5809,6 @@ bdev_io_ext_bounce_buffer(void)
 	g_io_done = false;
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 32, 14, 1);
 	ut_expected_io_set_iov(expected_io, 0, iov.iov_base, iov.iov_len);
-	expected_io->ext_io_opts = &ext_io_opts;
-	expected_io->copy_opts = true;
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	rc = spdk_bdev_writev_blocks_ext(desc, io_ch, &iov, 1, 32, 14, io_done, NULL, &ext_io_opts);
@@ -6086,22 +6077,32 @@ bdev_copy(void)
 
 	/* First test that if the bdev supports copy, the request won't be split */
 	bdev->md_len = 0;
-	bdev->blocklen = 4096;
-	num_blocks = 512;
+	bdev->blocklen = 512;
+	num_blocks = 128;
 	src_offset = bdev->blockcnt - num_blocks;
 
 	expected_io = ut_alloc_expected_copy_io(SPDK_BDEV_IO_TYPE_COPY, 0, src_offset, num_blocks);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
 	rc = spdk_bdev_copy_blocks(desc, ioch, 0, src_offset, num_blocks, io_done, NULL);
 	CU_ASSERT_EQUAL(rc, 0);
 	num_completed = stub_complete_io(1);
 	CU_ASSERT_EQUAL(num_completed, 1);
 
-	/* Check that if copy is not supported it'll fail */
+	/* Check that if copy is not supported it'll still work */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, src_offset, num_blocks, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 0, num_blocks, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
 	ut_enable_io_type(SPDK_BDEV_IO_TYPE_COPY, false);
 
 	rc = spdk_bdev_copy_blocks(desc, ioch, 0, src_offset, num_blocks, io_done, NULL);
-	CU_ASSERT_EQUAL(rc, -ENOTSUP);
+	CU_ASSERT_EQUAL(rc, 0);
+	num_completed = stub_complete_io(1);
+	CU_ASSERT_EQUAL(num_completed, 1);
+	num_completed = stub_complete_io(1);
+	CU_ASSERT_EQUAL(num_completed, 1);
 
 	ut_enable_io_type(SPDK_BDEV_IO_TYPE_COPY, true);
 	spdk_put_io_channel(ioch);
@@ -7043,7 +7044,7 @@ main(int argc, char **argv)
 	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
-	suite = CU_add_suite("bdev", null_init, null_clean);
+	suite = CU_add_suite("bdev", ut_bdev_setup, ut_bdev_teardown);
 
 	CU_ADD_TEST(suite, bytes_to_blocks_test);
 	CU_ADD_TEST(suite, num_blocks_test);

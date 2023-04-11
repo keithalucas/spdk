@@ -2,6 +2,10 @@
 
 ## v23.05: (Upcoming Release)
 
+### accel
+
+Added API `spdk_accel_submit_xor` to perform XOR.
+
 ### bdev
 
 A new API `spdk_bdev_module_claim_bdev_desc` was added. Unlike `spdk_bdev_module_claim_bdev`, this
@@ -18,6 +22,11 @@ New function `spdk_env_get_main_core` was added.
 New `spdk_nvmf_request_copy_to/from_buf()` APIs have been added, which support
 iovecs, unlike the deprecated `spdk_nvmf_request_get_data()`.
 
+Two functions related to Asynchronous Event and error handling have been made public:
+
+-	`spdk_nvmf_ctrlr_async_event_error_event`,
+-	`spdk_nvmf_ctrlr_abort_aer`.
+
 ### nvme
 
 New API `spdk_nvme_ns_get_format_index` was added to calculate the exact format index, that
@@ -25,6 +34,15 @@ was used to format the namespace.
 
 Added two new APIs `spdk_nvme_ns_cmd_io_mgmt_recv` and `spdk_nvme_ns_cmd_io_mgmt_send` to
 receive and send the I/O management commands.
+
+New `spdk_nvmf_transport_create_async` was added, it accepts a callback and callback argument.
+`spdk_nvmf_transport_create` is marked deprecated.
+
+### examples
+
+`examples/nvme/perf` application now accepts `--use-every-core` parameter that changes
+the existing worker and namespace association logic to access every namespace from each worker.
+This replicates behavior of bdevperf application when `-C` option is provided.
 
 ## v23.01
 

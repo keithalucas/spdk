@@ -50,6 +50,8 @@ enum spdk_accel_aux_iov_type {
 	SPDK_ACCEL_AUX_IOV_DST,
 	SPDK_ACCEL_AUX_IOV_SRC2,
 	SPDK_ACCEL_AUX_IOV_DST2,
+	SPDK_ACCEL_AXU_IOV_VIRT_SRC,
+	SPDK_ACCEL_AXU_IOV_VIRT_DST,
 	SPDK_ACCEL_AUX_IOV_MAX,
 };
 
@@ -63,10 +65,16 @@ struct spdk_accel_task {
 	void				*src_domain_ctx;
 	struct spdk_memory_domain	*dst_domain;
 	void				*dst_domain_ctx;
-	struct {
-		struct iovec		*iovs; /* iovs passed by the caller */
-		uint32_t		iovcnt; /* iovcnt passed by the caller */
-	} s;
+	union {
+		struct {
+			struct iovec		*iovs; /* iovs passed by the caller */
+			uint32_t		iovcnt; /* iovcnt passed by the caller */
+		} s;
+		struct {
+			void			**srcs;
+			uint32_t		cnt;
+		} nsrcs;
+	};
 	union {
 		struct {
 			struct iovec		*iovs; /* iovs passed by the caller */
@@ -209,13 +217,6 @@ static void __attribute__((constructor)) _spdk_accel_driver_register_##name(void
 { \
 	spdk_accel_driver_register(driver); \
 }
-
-/**
- * Retrieves accel memory domain.
- *
- * \return Accel memory domain.
- */
-struct spdk_memory_domain *spdk_accel_get_memory_domain(void);
 
 typedef void (*spdk_accel_sequence_get_buf_cb)(struct spdk_accel_sequence *seq, void *cb_arg);
 

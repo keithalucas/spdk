@@ -158,12 +158,6 @@ SYS_LIBS += -L/usr/local/lib
 COMMON_CFLAGS += -I/usr/local/include
 endif
 
-# Attach only if PMDK lib specified with configure
-ifneq ($(CONFIG_PMDK_DIR),)
-LIBS += -L$(CONFIG_PMDK_DIR)/src/nondebug
-COMMON_CFLAGS += -I$(CONFIG_PMDK_DIR)/src/include
-endif
-
 ifeq ($(CONFIG_RDMA),y)
 SYS_LIBS += -libverbs -lrdmacm
 endif
@@ -338,7 +332,9 @@ CFLAGS   += $(COMMON_CFLAGS) -Wno-pointer-sign -Wstrict-prototypes -Wold-style-d
 CXXFLAGS += $(COMMON_CFLAGS) -std=c++11
 
 SYS_LIBS += -lrt
+ifneq ($(OS),FreeBSD)
 SYS_LIBS += -luuid
+endif
 SYS_LIBS += -lssl
 SYS_LIBS += -lcrypto
 SYS_LIBS += -lm

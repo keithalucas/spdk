@@ -441,10 +441,13 @@ Example response:
     "framework_get_subsystems",
     "framework_monitor_context_switch",
     "spdk_kill_instance",
-    "accel_get_opc_assignments",
+    "accel_set_driver",
     "accel_crypto_key_create",
     "accel_crypto_key_destroy",
     "accel_crypto_keys_get",
+    "accel_assign_opc",
+    "accel_get_module_info",
+    "accel_get_opc_assignments",
     "ioat_scan_accel_module",
     "dsa_scan_accel_module",
     "dpdk_cryptodev_scan_accel_module",
@@ -3555,7 +3558,7 @@ Resize @ref bdev_config_null.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | Bdev name
-new_size                | Required | number      | Bdev new capacity in MB
+new_size                | Required | number      | Bdev new capacity in MiB
 
 #### Example
 
@@ -5830,224 +5833,6 @@ Example response:
         }
       }
     }
-}
-~~~
-### bdev_pmem_create_pool {#rpc_bdev_pmem_create_pool}
-
-Create a @ref bdev_config_pmem blk pool file. It is equivalent of following `pmempool create` command:
-
-~~~bash
-pmempool create -s $((num_blocks * block_size)) blk $block_size $pmem_file
-~~~
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-pmem_file               | Required | string      | Path to new pmem file
-num_blocks              | Required | number      | Number of blocks
-block_size              | Required | number      | Size of each block in bytes
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "block_size": 512,
-    "num_blocks": 131072,
-    "pmem_file": "/tmp/pmem_file"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_create_pool",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
-}
-~~~
-
-### bdev_pmem_get_pool_info {#rpc_bdev_pmem_get_pool_info}
-
-Retrieve basic information about PMDK memory pool.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-pmem_file               | Required | string      | Path to existing pmem file
-
-#### Result
-
-Array of objects describing memory pool:
-
-Name                    | Type        | Description
------------------------ | ----------- | -----------
-num_blocks              | number      | Number of blocks
-block_size              | number      | Size of each block in bytes
-
-#### Example
-
-Example request:
-
-~~~json
-request:
-{
-  "params": {
-    "pmem_file": "/tmp/pmem_file"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_get_pool_info",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": [
-    {
-      "block_size": 512,
-      "num_blocks": 129728
-    }
-  ]
-}
-~~~
-
-### bdev_pmem_delete_pool {#rpc_bdev_pmem_delete_pool}
-
-Delete pmem pool by removing file `pmem_file`. This method will fail if `pmem_file` is not a
-valid pmem pool file.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-pmem_file               | Required | string      | Path to new pmem file
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "pmem_file": "/tmp/pmem_file"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_delete_pool",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
-}
-~~~
-
-### bdev_pmem_create {#rpc_bdev_pmem_create}
-
-Construct @ref bdev_config_pmem bdev.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-name                    | Required | string      | Bdev name
-pmem_file               | Required | string      | Path to existing pmem blk pool file
-
-#### Result
-
-Name of newly created bdev.
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "pmem_file": "/tmp/pmem_file",
-    "name": "Pmem0"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_create",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": "Pmem0"
-}
-~~~
-
-### bdev_pmem_delete {#rpc_bdev_pmem_delete}
-
-Delete @ref bdev_config_pmem bdev. This call will not remove backing pool files.
-
-This method is available only if SPDK was built with PMDK support.
-
-#### Result
-
-`true` if bdev with provided name was deleted or `false` otherwise.
-
-#### Parameters
-
-Name                    | Optional | Type        | Description
------------------------ | -------- | ----------- | -----------
-name                    | Required | string      | Bdev name
-
-#### Example
-
-Example request:
-
-~~~json
-{
-  "params": {
-    "name": "Pmem0"
-  },
-  "jsonrpc": "2.0",
-  "method": "bdev_pmem_delete",
-  "id": 1
-}
-~~~
-
-Example response:
-
-~~~json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": true
 }
 ~~~
 
@@ -9633,7 +9418,8 @@ Create a logical volume on a logical volume store.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 lvol_name               | Required | string      | Name of logical volume to create
-size                    | Required | number      | Desired size of logical volume in bytes
+size                    | Optional | number      | Desired size of logical volume in bytes (Deprecated. Please use size_in_mib instead.)
+size_in_mib             | Optional | number      | Desired size of logical volume in MiB
 thin_provision          | Optional | boolean     | True to enable thin provisioning
 uuid                    | Optional | string      | UUID of logical volume store to create logical volume on
 lvs_name                | Optional | string      | Name of logical volume store to create logical volume on
@@ -9657,7 +9443,7 @@ Example request:
   "id": 1,
   "params": {
     "lvol_name": "LVOL0",
-    "size": 1048576,
+    "size_in_mib": 1,
     "lvs_name": "LVS0",
     "clear_method": "unmap",
     "thin_provision": true
@@ -9803,7 +9589,8 @@ Resize a logical volume.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | UUID or alias of the logical volume to resize
-size                    | Required | number      | Desired size of the logical volume in bytes
+size                    | Optional | number      | Desired size of the logical volume in bytes (Deprecated. Please use size_in_mib instead.)
+size_in_mib             | Optional | number      | Desired size of the logical volume in MiB
 
 #### Example
 
@@ -9816,7 +9603,7 @@ Example request:
   "id": 1,
   "params": {
     "name": "51638754-ca16-43a7-9f8f-294a0805ab0a",
-    "size": 2097152
+    "size_in_mib": 2
   }
 }
 ~~~
@@ -11852,7 +11639,7 @@ Resize @ref bdev_config_daos.
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | Bdev name
-new_size                | Required | number      | Bdev new capacity in MB
+new_size                | Required | number      | Bdev new capacity in MiB
 
 #### Example
 

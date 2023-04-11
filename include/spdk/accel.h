@@ -21,9 +21,6 @@ extern "C" {
 /** Data Encryption Key identifier */
 struct spdk_accel_crypto_key;
 
-/* Flags for accel operations */
-#define ACCEL_FLAG_PERSISTENT (1 << 0)
-
 struct spdk_accel_crypto_key_create_param {
 	char *cipher;	/**< Cipher to be used for crypto operations */
 	char *hex_key;	/**< Hexlified key */
@@ -42,7 +39,8 @@ enum accel_opcode {
 	ACCEL_OPC_DECOMPRESS		= 7,
 	ACCEL_OPC_ENCRYPT		= 8,
 	ACCEL_OPC_DECRYPT		= 9,
-	ACCEL_OPC_LAST			= 10,
+	ACCEL_OPC_XOR			= 10,
+	ACCEL_OPC_LAST			= 11,
 };
 
 /**
@@ -297,6 +295,22 @@ int spdk_accel_submit_decompress(struct spdk_io_channel *ch, struct iovec *dst_i
 				 size_t dst_iovcnt, struct iovec *src_iovs,
 				 size_t src_iovcnt, uint32_t *output_size, int flags,
 				 spdk_accel_completion_cb cb_fn, void *cb_arg);
+
+/**
+ * Submit an xor request.
+ *
+ * \param ch I/O channel associated with this call.
+ * \param dst Destination to write the data to.
+ * \param sources Array of source buffers.
+ * \param nsrcs Number of source buffers in the array.
+ * \param nbytes Length in bytes.
+ * \param cb_fn Called when this copy operation completes.
+ * \param cb_arg Callback argument.
+ *
+ * \return 0 on success, negative errno on failure.
+ */
+int spdk_accel_submit_xor(struct spdk_io_channel *ch, void *dst, void **sources, uint32_t nsrcs,
+			  uint64_t nbytes, spdk_accel_completion_cb cb_fn, void *cb_arg);
 
 /** Object grouping multiple accel operations to be executed at the same point in time */
 struct spdk_accel_sequence;
@@ -619,6 +633,13 @@ void spdk_accel_write_config_json(struct spdk_json_write_ctx *w);
  * \return 0 on success, negetive errno otherwise.
  */
 int spdk_accel_set_driver(const char *name);
+
+/**
+ * Retrieves accel memory domain.
+ *
+ * \return Accel memory domain.
+ */
+struct spdk_memory_domain *spdk_accel_get_memory_domain(void);
 
 #ifdef __cplusplus
 }

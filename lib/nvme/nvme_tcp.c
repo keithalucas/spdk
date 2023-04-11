@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2018 Intel Corporation. All rights reserved.
  *   Copyright (c) 2020 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2021, 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 /*
@@ -225,7 +225,7 @@ nvme_tcp_parse_addr(struct sockaddr_storage *sa, int family, const char *addr, c
 	ret = getaddrinfo(addr, service, &hints, &res);
 	if (ret) {
 		SPDK_ERRLOG("getaddrinfo failed: %s (%d)\n", gai_strerror(ret), ret);
-		return ret;
+		return -(abs(ret));
 	}
 
 	if (res->ai_addrlen > sizeof(*sa)) {
@@ -411,12 +411,18 @@ _tcp_write_pdu(struct nvme_tcp_pdu *pdu)
 	uint32_t mapped_length = 0;
 	struct nvme_tcp_qpair *tqpair = pdu->qpair;
 
-	pdu->sock_req.iovcnt = nvme_tcp_build_iovs(pdu->iov, NVME_TCP_MAX_SGL_DESCRIPTORS, pdu,
+	pdu->sock_req.iovcnt = nvme_tcp_build_iovs(pdu->iov, SPDK_COUNTOF(pdu->iov), pdu,
 			       (bool)tqpair->flags.host_hdgst_enable, (bool)tqpair->flags.host_ddgst_enable,
 			       &mapped_length);
+	TAILQ_INSERT_TAIL(&tqpair->send_queue, pdu, tailq);
+	if (spdk_unlikely(mapped_length < pdu->data_len)) {
+		SPDK_ERRLOG("could not map the whole %u bytes (mapped only %u bytes)\n", pdu->data_len,
+			    mapped_length);
+		_pdu_write_done(pdu, -EINVAL);
+		return;
+	}
 	pdu->sock_req.cb_fn = _pdu_write_done;
 	pdu->sock_req.cb_arg = pdu;
-	TAILQ_INSERT_TAIL(&tqpair->send_queue, pdu, tailq);
 	tqpair->stats->submitted_requests++;
 	spdk_sock_writev_async(tqpair->sock, &pdu->sock_req);
 }
@@ -789,6 +795,7 @@ nvme_tcp_qpair_abort_reqs(struct spdk_nvme_qpair *qpair, uint32_t dnr)
 	struct spdk_nvme_cpl cpl = {};
 	struct nvme_tcp_qpair *tqpair = nvme_tcp_qpair(qpair);
 
+	cpl.sqid = qpair->id;
 	cpl.status.sc = SPDK_NVME_SC_ABORTED_SQ_DELETION;
 	cpl.status.sct = SPDK_NVME_SCT_GENERIC;
 	cpl.status.dnr = dnr;
@@ -1883,6 +1890,13 @@ nvme_tcp_qpair_connect_sock(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpai
 
 	memset(&dst_addr, 0, sizeof(dst_addr));
 
+	port = spdk_strtol(ctrlr->trid.trsvcid, 10);
+	if (port <= 0 || port >= INT_MAX) {
+		SPDK_ERRLOG("Invalid port: %s\n", ctrlr->trid.trsvcid);
+		rc = -1;
+		return rc;
+	}
+
 	SPDK_DEBUGLOG(nvme, "trsvcid is %s\n", ctrlr->trid.trsvcid);
 	rc = nvme_tcp_parse_addr(&dst_addr, family, ctrlr->trid.traddr, ctrlr->trid.trsvcid);
 	if (rc != 0) {
@@ -1897,13 +1911,6 @@ nvme_tcp_qpair_connect_sock(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpai
 			SPDK_ERRLOG("src_addr nvme_tcp_parse_addr() failed\n");
 			return rc;
 		}
-	}
-
-	port = spdk_strtol(ctrlr->trid.trsvcid, 10);
-	if (port <= 0 || port >= INT_MAX) {
-		SPDK_ERRLOG("Invalid port: %s\n", ctrlr->trid.trsvcid);
-		rc = -1;
-		return rc;
 	}
 
 	sock_impl_name = ctrlr->opts.psk[0] ? "ssl" : NULL;
@@ -2165,13 +2172,7 @@ nvme_tcp_ctrlr_get_max_xfer_size(struct spdk_nvme_ctrlr *ctrlr)
 static uint16_t
 nvme_tcp_ctrlr_get_max_sges(struct spdk_nvme_ctrlr *ctrlr)
 {
-	/*
-	 * We do not support >1 SGE in the initiator currently,
-	 *  so we can only return 1 here.  Once that support is
-	 *  added, this should return ctrlr->cdata.nvmf_specific.msdbd
-	 *  instead.
-	 */
-	return 1;
+	return NVME_TCP_MAX_SGL_DESCRIPTORS;
 }
 
 static int

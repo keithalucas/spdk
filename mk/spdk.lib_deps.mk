@@ -1,7 +1,7 @@
 #  SPDX-License-Identifier: BSD-3-Clause
 #  Copyright (C) 2015 Intel Corporation.
-#  Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES
 #  All rights reserved.
+#  Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 
 # A quick note on organization:
@@ -59,7 +59,7 @@ DEPDIRS-net := log util $(JSON_LIBS)
 DEPDIRS-notify := log util $(JSON_LIBS)
 DEPDIRS-trace := log util $(JSON_LIBS)
 
-DEPDIRS-bdev := log util thread $(JSON_LIBS) notify trace dma
+DEPDIRS-bdev := accel log util thread $(JSON_LIBS) notify trace dma
 DEPDIRS-blobfs := log thread blob trace util
 DEPDIRS-event := log util thread $(JSON_LIBS) trace init
 DEPDIRS-init := jsonrpc json log rpc thread util
@@ -145,7 +145,6 @@ DEPDIRS-bdev_null := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_nvme = $(BDEV_DEPS_THREAD) accel nvme trace
 DEPDIRS-bdev_ocf := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_passthru := $(BDEV_DEPS_THREAD)
-DEPDIRS-bdev_pmem := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_raid := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_rbd := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_uring := $(BDEV_DEPS_THREAD)

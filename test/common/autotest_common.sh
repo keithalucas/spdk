@@ -128,8 +128,6 @@ export SPDK_TEST_IOAT
 export SPDK_TEST_BLOBFS
 : ${SPDK_TEST_VHOST_INIT=0}
 export SPDK_TEST_VHOST_INIT
-: ${SPDK_TEST_PMDK=0}
-export SPDK_TEST_PMDK
 : ${SPDK_TEST_LVOL=0}
 export SPDK_TEST_LVOL
 : ${SPDK_TEST_VBDEV_COMPRESS=0}
@@ -227,6 +225,10 @@ leak:libtcmalloc_minimal.so
 
 # Suppress leaks in libiscsi
 leak:libiscsi.so
+
+# Suppress leaks in libcrypto
+# Below is caused by openssl 3.0.8 leaks
+leak:libcrypto.so
 EOL
 
 # Suppress leaks in libfuse3
@@ -437,11 +439,6 @@ function get_config_params() {
 
 	if [ $SPDK_TEST_NVME_CUSE -eq 1 ]; then
 		config_params+=' --with-nvme-cuse'
-	fi
-
-	# for options with both dependencies and a test flag, set them here
-	if [ -f /usr/include/libpmemblk.h ] && [ $SPDK_TEST_PMDK -eq 1 ]; then
-		config_params+=' --with-pmdk'
 	fi
 
 	if [ -f /usr/include/libpmem.h ] && [ $SPDK_TEST_VBDEV_COMPRESS -eq 1 ]; then
@@ -1339,12 +1336,19 @@ function autotest_cleanup() {
 	local autotest_es=$?
 	xtrace_disable
 
+	# Slurp at_app_exit() so we can kill all lingering vhost and qemu processes
+	# in one swing. We do this in a subshell as vhost/common.sh is too eager to
+	# do some extra work which we don't care about in this context.
+	# shellcheck source=/dev/null
+	vhost_reap() (source "$rootdir/test/vhost/common.sh" || return 0 && at_app_exit)
+
 	# catch any stray core files and kill all remaining SPDK processes. Update
 	# autotest_es in case autotest reported success but cores and/or processes
 	# were left behind regardless.
 
 	process_core || autotest_es=1
 	reap_spdk_processes || autotest_es=1
+	vhost_reap || autotest_es=1
 
 	$rootdir/scripts/setup.sh reset
 	$rootdir/scripts/setup.sh cleanup
@@ -1404,6 +1408,15 @@ function freebsd_update_contigmem_mod() {
 			cp -f "$rootdir/dpdk/build/kmod/nic_uio.ko" /boot/modules/
 			cp -f "$rootdir/dpdk/build/kmod/nic_uio.ko" /boot/kernel/
 		fi
+	fi
+}
+
+function freebsd_set_maxsock_buf() {
+	# FreeBSD needs 4MB maxsockbuf size to pass socket unit tests.
+	# Otherwise tests fail due to ENOBUFS when trying to do setsockopt(SO_RCVBUF|SO_SNDBUF).
+	# See https://github.com/spdk/spdk/issues/2943
+	if [[ $(uname) = FreeBSD ]] && (($(sysctl -n kern.ipc.maxsockbuf) < 4194304)); then
+		sysctl kern.ipc.maxsockbuf=4194304
 	fi
 }
 
@@ -1484,14 +1497,15 @@ function nvme_namespace_revert() {
 				continue
 			fi
 			tnvmcap=$(nvme id-ctrl ${nvme_ctrlr} | grep tnvmcap | cut -d: -f2)
+			cntlid=$(nvme id-ctrl ${nvme_ctrlr} | grep cntlid | cut -d: -f2)
 			blksize=512
 
 			size=$((tnvmcap / blksize))
 
-			nvme detach-ns ${nvme_ctrlr} -n 0xffffffff -c 0 || true
+			nvme detach-ns ${nvme_ctrlr} -n 0xffffffff -c $cntlid || true
 			nvme delete-ns ${nvme_ctrlr} -n 0xffffffff || true
 			nvme create-ns ${nvme_ctrlr} -s ${size} -c ${size} -b ${blksize}
-			nvme attach-ns ${nvme_ctrlr} -n 1 -c 0
+			nvme attach-ns ${nvme_ctrlr} -n 1 -c $cntlid
 			nvme reset ${nvme_ctrlr}
 			waitforfile "${nvme_ctrlr}n1"
 		fi

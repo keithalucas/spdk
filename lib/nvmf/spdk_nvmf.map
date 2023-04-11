@@ -67,6 +67,7 @@
 	spdk_nvmf_subsystem_get_max_nsid;
 	spdk_nvmf_transport_opts_init;
 	spdk_nvmf_transport_create;
+	spdk_nvmf_transport_create_async;
 	spdk_nvmf_transport_destroy;
 	spdk_nvmf_tgt_get_transport;
 	spdk_nvmf_transport_get_first;
@@ -124,6 +125,8 @@
 	spdk_nvmf_ctrlr_restore_migr_data;
 	spdk_nvmf_req_get_xfer;
 	spdk_nvmf_poll_group_remove;
+	spdk_nvmf_ctrlr_async_event_error_event;
+	spdk_nvmf_ctrlr_abort_aer;
 
 	local: *;
 };

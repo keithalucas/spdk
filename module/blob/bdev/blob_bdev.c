@@ -18,6 +18,9 @@ struct blob_bdev {
 	struct spdk_bs_dev	bs_dev;
 	struct spdk_bdev	*bdev;
 	struct spdk_bdev_desc	*desc;
+	bool			write;
+	int32_t			refs;
+	struct spdk_spinlock	lock;
 };
 
 struct blob_resubmit {
@@ -169,25 +172,27 @@ bdev_blob_writev(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 	}
 }
 
+static inline void
+blob_ext_io_opts_to_bdev_opts(struct spdk_bdev_ext_io_opts *dst, struct spdk_blob_ext_io_opts *src)
+{
+	memset(dst, 0, sizeof(*dst));
+	dst->size = sizeof(*dst);
+	dst->memory_domain = src->memory_domain;
+	dst->memory_domain_ctx = src->memory_domain_ctx;
+}
+
 static void
 bdev_blob_readv_ext(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 		    struct iovec *iov, int iovcnt,
 		    uint64_t lba, uint32_t lba_count, struct spdk_bs_dev_cb_args *cb_args,
 		    struct spdk_blob_ext_io_opts *io_opts)
 {
-	struct spdk_bdev_ext_io_opts *bdev_io_opts = NULL;
+	struct spdk_bdev_ext_io_opts bdev_io_opts;
 	int rc;
 
-	if (io_opts) {
-		/* bdev ext API requires ext_io_opts to be allocated by the user, we don't have enough context to allocate
-		 * bdev ext_opts structure here. Also blob and bdev ext_opts are not API/ABI compatible, so we can't use the given
-		 * io_opts. Restore ext_opts passed by the user of this bs_dev */
-		bdev_io_opts = io_opts->user_ctx;
-		assert(bdev_io_opts);
-	}
-
+	blob_ext_io_opts_to_bdev_opts(&bdev_io_opts, io_opts);
 	rc = spdk_bdev_readv_blocks_ext(__get_desc(dev), channel, iov, iovcnt, lba, lba_count,
-					bdev_blob_io_complete, cb_args, bdev_io_opts);
+					bdev_blob_io_complete, cb_args, &bdev_io_opts);
 	if (rc == -ENOMEM) {
 		bdev_blob_queue_io(dev, channel, iov, iovcnt, lba, 0, lba_count, SPDK_BDEV_IO_TYPE_READ, cb_args,
 				   io_opts);
@@ -202,19 +207,12 @@ bdev_blob_writev_ext(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 		     uint64_t lba, uint32_t lba_count, struct spdk_bs_dev_cb_args *cb_args,
 		     struct spdk_blob_ext_io_opts *io_opts)
 {
-	struct spdk_bdev_ext_io_opts *bdev_io_opts = NULL;
+	struct spdk_bdev_ext_io_opts bdev_io_opts;
 	int rc;
 
-	if (io_opts) {
-		/* bdev ext API requires ext_io_opts to be allocated by the user, we don't have enough context to allocate
-		 * bdev ext_opts structure here. Also blob and bdev ext_opts are not API/ABI compatible, so we can't use the given
-		 * io_opts. Restore ext_opts passed by the user of this bs_dev */
-		bdev_io_opts = io_opts->user_ctx;
-		assert(bdev_io_opts);
-	}
-
+	blob_ext_io_opts_to_bdev_opts(&bdev_io_opts, io_opts);
 	rc = spdk_bdev_writev_blocks_ext(__get_desc(dev), channel, iov, iovcnt, lba, lba_count,
-					 bdev_blob_io_complete, cb_args, bdev_io_opts);
+					 bdev_blob_io_complete, cb_args, &bdev_io_opts);
 	if (rc == -ENOMEM) {
 		bdev_blob_queue_io(dev, channel, iov, iovcnt, lba, 0, lba_count, SPDK_BDEV_IO_TYPE_WRITE, cb_args,
 				   io_opts);
@@ -330,11 +328,14 @@ bdev_blob_resubmit(void *arg)
 int
 spdk_bs_bdev_claim(struct spdk_bs_dev *bs_dev, struct spdk_bdev_module *module)
 {
-	struct spdk_bdev_desc *desc = __get_desc(bs_dev);
+	struct blob_bdev *blob_bdev = (struct blob_bdev *)bs_dev;
+	struct spdk_bdev_desc *desc = blob_bdev->desc;
+	enum spdk_bdev_claim_type claim_type;
 	int rc;
 
-	rc = spdk_bdev_module_claim_bdev_desc(desc, SPDK_BDEV_CLAIM_READ_MANY_WRITE_ONE,
-					      NULL, module);
+	claim_type = blob_bdev->write ? SPDK_BDEV_CLAIM_READ_MANY_WRITE_ONE :
+		     SPDK_BDEV_CLAIM_READ_MANY_WRITE_NONE;
+	rc = spdk_bdev_module_claim_bdev_desc(desc, claim_type, NULL, module);
 	if (rc != 0) {
 		SPDK_ERRLOG("could not claim bs dev\n");
 		return rc;
@@ -347,23 +348,88 @@ static struct spdk_io_channel *
 bdev_blob_create_channel(struct spdk_bs_dev *dev)
 {
 	struct blob_bdev *blob_bdev = (struct blob_bdev *)dev;
+	struct spdk_io_channel *ch;
 
-	return spdk_bdev_get_io_channel(blob_bdev->desc);
+	ch = spdk_bdev_get_io_channel(blob_bdev->desc);
+	if (ch != NULL) {
+		spdk_spin_lock(&blob_bdev->lock);
+		blob_bdev->refs++;
+		spdk_spin_unlock(&blob_bdev->lock);
+	}
+
+	return ch;
+}
+
+static void
+bdev_blob_free(struct blob_bdev *blob_bdev)
+{
+	assert(blob_bdev->refs == 0);
+
+	spdk_spin_destroy(&blob_bdev->lock);
+	free(blob_bdev);
 }
 
 static void
 bdev_blob_destroy_channel(struct spdk_bs_dev *dev, struct spdk_io_channel *channel)
 {
+	struct blob_bdev *blob_bdev = (struct blob_bdev *)dev;
+	int32_t refs;
+
+	spdk_spin_lock(&blob_bdev->lock);
+
+	assert(blob_bdev->refs > 0);
+	blob_bdev->refs--;
+	refs = blob_bdev->refs;
+
+	spdk_spin_unlock(&blob_bdev->lock);
+
 	spdk_put_io_channel(channel);
+
+	/*
+	 * If the value of blob_bdev->refs taken while holding blob_bdev->refs is zero, the blob and
+	 * this channel have been destroyed. This means that dev->destroy() has been called and it
+	 * would be an error (akin to use after free) if dev is dereferenced after destroying it.
+	 * Thus, there should be no race with bdev_blob_create_channel().
+	 *
+	 * Because the value of blob_bdev->refs was taken while holding the lock here and the same
+	 * is done in bdev_blob_destroy(), there is no race with bdev_blob_destroy().
+	 */
+	if (refs == 0) {
+		bdev_blob_free(blob_bdev);
+	}
 }
 
 static void
 bdev_blob_destroy(struct spdk_bs_dev *bs_dev)
 {
-	struct spdk_bdev_desc *desc = __get_desc(bs_dev);
+	struct blob_bdev *blob_bdev = (struct blob_bdev *)bs_dev;
+	struct spdk_bdev_desc *desc;
+	int32_t refs;
+
+	spdk_spin_lock(&blob_bdev->lock);
+
+	desc = blob_bdev->desc;
+	blob_bdev->desc = NULL;
+	blob_bdev->refs--;
+	refs = blob_bdev->refs;
+
+	spdk_spin_unlock(&blob_bdev->lock);
 
 	spdk_bdev_close(desc);
-	free(bs_dev);
+
+	/*
+	 * If the value of blob_bdev->refs taken while holding blob_bdev->refs is zero,
+	 * bs_dev->destroy() has been called and all the channels have been destroyed. It would be
+	 * an error (akin to use after free) if bs_dev is dereferenced after destroying it. Thus,
+	 * there should be no race with bdev_blob_create_channel().
+	 *
+	 * Because the value of blob_bdev->refs was taken while holding the lock here and the same
+	 * is done in bdev_blob_destroy_channel(), there is no race with
+	 * bdev_blob_destroy_channel().
+	 */
+	if (refs == 0) {
+		bdev_blob_free(blob_bdev);
+	}
 }
 
 static struct spdk_bdev *
@@ -417,12 +483,21 @@ blob_bdev_init(struct blob_bdev *b, struct spdk_bdev_desc *desc)
 }
 
 int
-spdk_bdev_create_bs_dev_ext(const char *bdev_name, spdk_bdev_event_cb_t event_cb,
-			    void *event_ctx, struct spdk_bs_dev **_bs_dev)
+spdk_bdev_create_bs_dev(const char *bdev_name, bool write,
+			struct spdk_bdev_bs_dev_opts *opts, size_t opts_size,
+			spdk_bdev_event_cb_t event_cb, void *event_ctx,
+			struct spdk_bs_dev **bs_dev)
 {
 	struct blob_bdev *b;
 	struct spdk_bdev_desc *desc;
 	int rc;
+
+	assert(spdk_get_thread() != NULL);
+
+	if (opts != NULL && opts_size != sizeof(*opts)) {
+		SPDK_ERRLOG("bdev name '%s': unsupported options\n", bdev_name);
+		return -EINVAL;
+	}
 
 	b = calloc(1, sizeof(*b));
 
@@ -431,7 +506,7 @@ spdk_bdev_create_bs_dev_ext(const char *bdev_name, spdk_bdev_event_cb_t event_cb
 		return -ENOMEM;
 	}
 
-	rc = spdk_bdev_open_ext(bdev_name, true, event_cb, event_ctx, &desc);
+	rc = spdk_bdev_open_ext(bdev_name, write, event_cb, event_ctx, &desc);
 	if (rc != 0) {
 		free(b);
 		return rc;
@@ -439,7 +514,17 @@ spdk_bdev_create_bs_dev_ext(const char *bdev_name, spdk_bdev_event_cb_t event_cb
 
 	blob_bdev_init(b, desc);
 
-	*_bs_dev = &b->bs_dev;
+	*bs_dev = &b->bs_dev;
+	b->write = write;
+	b->refs = 1;
+	spdk_spin_init(&b->lock);
 
 	return 0;
+}
+
+int
+spdk_bdev_create_bs_dev_ext(const char *bdev_name, spdk_bdev_event_cb_t event_cb,
+			    void *event_ctx, struct spdk_bs_dev **bs_dev)
+{
+	return spdk_bdev_create_bs_dev(bdev_name, true, NULL, 0, event_cb, event_ctx, bs_dev);
 }

@@ -43,6 +43,14 @@
 
 static struct spdk_thread *g_app_thread;
 
+struct spdk_interrupt {
+	int			efd;
+	struct spdk_thread	*thread;
+	spdk_interrupt_fn	fn;
+	void			*arg;
+	char			name[SPDK_MAX_POLLER_NAME_LEN + 1];
+};
+
 enum spdk_poller_state {
 	/* The poller is registered with a thread but not currently executing its fn. */
 	SPDK_POLLER_STATE_WAITING,
@@ -79,8 +87,7 @@ struct spdk_poller {
 	spdk_poller_fn			fn;
 	void				*arg;
 	struct spdk_thread		*thread;
-	/* Native interruptfd for period or busy poller */
-	int				interruptfd;
+	struct spdk_interrupt		*intr;
 	spdk_poller_set_interrupt_mode_cb set_intr_cb_fn;
 	void				*set_intr_cb_arg;
 
@@ -674,6 +681,8 @@ exited:
 	}
 }
 
+static void _thread_exit(void *ctx);
+
 int
 spdk_thread_exit(struct spdk_thread *thread)
 {
@@ -691,6 +700,11 @@ spdk_thread_exit(struct spdk_thread *thread)
 	thread->exit_timeout_tsc = spdk_get_ticks() + (spdk_get_ticks_hz() *
 				   SPDK_THREAD_EXIT_TIMEOUT_SEC);
 	thread->state = SPDK_THREAD_STATE_EXITING;
+
+	if (spdk_interrupt_mode_is_enabled()) {
+		spdk_thread_send_msg(thread, _thread_exit, thread);
+	}
+
 	return 0;
 }
 
@@ -1091,12 +1105,45 @@ thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 	return rc;
 }
 
+static void
+_thread_remove_pollers(void *ctx)
+{
+	struct spdk_thread *thread = ctx;
+	struct spdk_poller *poller, *tmp;
+
+	TAILQ_FOREACH_REVERSE_SAFE(poller, &thread->active_pollers,
+				   active_pollers_head, tailq, tmp) {
+		if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
+			TAILQ_REMOVE(&thread->active_pollers, poller, tailq);
+			free(poller);
+		}
+	}
+
+	RB_FOREACH_SAFE(poller, timed_pollers_tree, &thread->timed_pollers, tmp) {
+		if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
+			poller_remove_timer(thread, poller);
+			free(poller);
+		}
+	}
+
+	thread->poller_unregistered = false;
+}
+
+static void
+_thread_exit(void *ctx)
+{
+	struct spdk_thread *thread = ctx;
+
+	assert(thread->state == SPDK_THREAD_STATE_EXITING);
+
+	thread_exit(thread, spdk_get_ticks());
+}
+
 int
 spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 {
 	struct spdk_thread *orig_thread;
 	int rc;
-	uint64_t notify = 1;
 
 	orig_thread = _get_thread();
 	tls_thread = thread;
@@ -1114,46 +1161,13 @@ spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 			 */
 			rc = thread_poll(thread, max_msgs, now);
 		}
+
+		if (spdk_unlikely(thread->state == SPDK_THREAD_STATE_EXITING)) {
+			thread_exit(thread, now);
+		}
 	} else {
 		/* Non-block wait on thread's fd_group */
 		rc = spdk_fd_group_wait(thread->fgrp, 0);
-		SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
-		if (spdk_unlikely(!thread->in_interrupt)) {
-			/* The thread transitioned to poll mode in a msg during the above processing.
-			 * Clear msg_fd since thread messages will be polled directly in poll mode.
-			 */
-			rc = read(thread->msg_fd, &notify, sizeof(notify));
-			if (rc < 0 && errno != EAGAIN) {
-				SPDK_ERRLOG("failed to acknowledge msg queue: %s.\n", spdk_strerror(errno));
-			}
-		}
-
-		/* Reap unregistered pollers out of poller execution in intr mode */
-		if (spdk_unlikely(thread->poller_unregistered)) {
-			struct spdk_poller *poller, *tmp;
-
-			TAILQ_FOREACH_REVERSE_SAFE(poller, &thread->active_pollers,
-						   active_pollers_head, tailq, tmp) {
-				if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
-					TAILQ_REMOVE(&thread->active_pollers, poller, tailq);
-					free(poller);
-				}
-			}
-
-			RB_FOREACH_SAFE(poller, timed_pollers_tree, &thread->timed_pollers, tmp) {
-				if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
-					poller_remove_timer(thread, poller);
-					free(poller);
-				}
-			}
-
-			thread->poller_unregistered = false;
-		}
-	}
-
-
-	if (spdk_unlikely(thread->state == SPDK_THREAD_STATE_EXITING)) {
-		thread_exit(thread, now);
 	}
 
 	thread_update_stats(thread, spdk_get_ticks(), now, rc);
@@ -1389,7 +1403,7 @@ interrupt_timerfd_process(void *arg)
 	int rc;
 
 	/* clear the level of interval timer */
-	rc = read(poller->interruptfd, &exp, sizeof(exp));
+	rc = read(poller->intr->efd, &exp, sizeof(exp));
 	if (rc < 0) {
 		if (rc == -EAGAIN) {
 			return 0;
@@ -1406,9 +1420,7 @@ interrupt_timerfd_process(void *arg)
 static int
 period_poller_interrupt_init(struct spdk_poller *poller)
 {
-	struct spdk_fd_group *fgrp = poller->thread->fgrp;
 	int timerfd;
-	int rc;
 
 	SPDK_DEBUGLOG(thread, "timerfd init for periodic poller %s\n", poller->name);
 	timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
@@ -1416,27 +1428,30 @@ period_poller_interrupt_init(struct spdk_poller *poller)
 		return -errno;
 	}
 
-	rc = SPDK_FD_GROUP_ADD(fgrp, timerfd, interrupt_timerfd_process, poller);
-	if (rc < 0) {
+	poller->intr = spdk_interrupt_register(timerfd, interrupt_timerfd_process, poller, poller->name);
+	if (poller->intr == NULL) {
 		close(timerfd);
-		return rc;
+		return -1;
 	}
 
-	poller->interruptfd = timerfd;
 	return 0;
 }
 
 static void
 period_poller_set_interrupt_mode(struct spdk_poller *poller, void *cb_arg, bool interrupt_mode)
 {
-	int timerfd = poller->interruptfd;
+	int timerfd;
 	uint64_t now_tick = spdk_get_ticks();
 	uint64_t ticks = spdk_get_ticks_hz();
 	int ret;
 	struct itimerspec new_tv = {};
 	struct itimerspec old_tv = {};
 
+	assert(poller->intr != NULL);
 	assert(poller->period_ticks != 0);
+
+	timerfd = poller->intr->efd;
+
 	assert(timerfd >= 0);
 
 	SPDK_DEBUGLOG(thread, "timerfd set poller %s into %s mode\n", poller->name,
@@ -1484,18 +1499,19 @@ period_poller_set_interrupt_mode(struct spdk_poller *poller, void *cb_arg, bool 
 static void
 poller_interrupt_fini(struct spdk_poller *poller)
 {
+	int fd;
+
 	SPDK_DEBUGLOG(thread, "interrupt fini for poller %s\n", poller->name);
-	assert(poller->interruptfd >= 0);
-	spdk_fd_group_remove(poller->thread->fgrp, poller->interruptfd);
-	close(poller->interruptfd);
-	poller->interruptfd = -1;
+	assert(poller->intr != NULL);
+	fd = poller->intr->efd;
+	spdk_interrupt_unregister(&poller->intr);
+	close(fd);
 }
 
 static int
 busy_poller_interrupt_init(struct spdk_poller *poller)
 {
 	int busy_efd;
-	int rc;
 
 	SPDK_DEBUGLOG(thread, "busy_efd init for busy poller %s\n", poller->name);
 	busy_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -1504,21 +1520,19 @@ busy_poller_interrupt_init(struct spdk_poller *poller)
 		return -errno;
 	}
 
-	rc = spdk_fd_group_add(poller->thread->fgrp, busy_efd,
-			       poller->fn, poller->arg, poller->name);
-	if (rc < 0) {
+	poller->intr = spdk_interrupt_register(busy_efd, poller->fn, poller->arg, poller->name);
+	if (poller->intr == NULL) {
 		close(busy_efd);
-		return rc;
+		return -1;
 	}
 
-	poller->interruptfd = busy_efd;
 	return 0;
 }
 
 static void
 busy_poller_set_interrupt_mode(struct spdk_poller *poller, void *cb_arg, bool interrupt_mode)
 {
-	int busy_efd = poller->interruptfd;
+	int busy_efd = poller->intr->efd;
 	uint64_t notify = 1;
 	int rc __attribute__((unused));
 
@@ -1579,13 +1593,8 @@ spdk_poller_register_interrupt(struct spdk_poller *poller,
 		return;
 	}
 
-	/* when a poller is created we don't know if the user is ever going to
-	 * enable interrupts on it by calling this function, so the poller
-	 * registration function has to immediately create a interruptfd.
-	 * When this function does get called by user, we have to then destroy
-	 * that interruptfd.
-	 */
-	if (poller->set_intr_cb_fn && poller->interruptfd >= 0) {
+	/* If this poller already had an interrupt, clean the old one up. */
+	if (poller->intr != NULL) {
 		poller_interrupt_fini(poller);
 	}
 
@@ -1650,7 +1659,7 @@ poller_register(spdk_poller_fn fn,
 	poller->fn = fn;
 	poller->arg = arg;
 	poller->thread = thread;
-	poller->interruptfd = -1;
+	poller->intr = NULL;
 	if (thread->next_poller_id == 0) {
 		SPDK_WARNLOG("Poller ID rolled over. Poller ID is duplicated.\n");
 		thread->next_poller_id = 1;
@@ -1670,7 +1679,9 @@ poller_register(spdk_poller_fn fn,
 				return NULL;
 			}
 
-			spdk_poller_register_interrupt(poller, period_poller_set_interrupt_mode, NULL);
+			poller->set_intr_cb_fn = period_poller_set_interrupt_mode;
+			poller->set_intr_cb_arg = NULL;
+
 		} else {
 			/* If the poller doesn't have a period, create interruptfd that's always
 			 * busy automatically when running in interrupt mode.
@@ -1682,7 +1693,13 @@ poller_register(spdk_poller_fn fn,
 				return NULL;
 			}
 
-			spdk_poller_register_interrupt(poller, busy_poller_set_interrupt_mode, NULL);
+			poller->set_intr_cb_fn = busy_poller_set_interrupt_mode;
+			poller->set_intr_cb_arg = NULL;
+		}
+
+		/* Set poller into interrupt mode if thread is in interrupt. */
+		if (poller->thread->in_interrupt) {
+			poller->set_intr_cb_fn(poller, poller->set_intr_cb_arg, true);
 		}
 	}
 
@@ -1748,14 +1765,16 @@ spdk_poller_unregister(struct spdk_poller **ppoller)
 
 	if (spdk_interrupt_mode_is_enabled()) {
 		/* Release the interrupt resource for period or busy poller */
-		if (poller->interruptfd >= 0) {
+		if (poller->intr != NULL) {
 			poller_interrupt_fini(poller);
 		}
 
-		/* Mark there is poller unregistered. Then unregistered pollers will
-		 * get reaped by spdk_thread_poll also in intr mode.
-		 */
-		thread->poller_unregistered = true;
+		/* If there is not already a pending poller removal, generate
+		 * a message to go process removals. */
+		if (!thread->poller_unregistered) {
+			thread->poller_unregistered = true;
+			spdk_thread_send_msg(thread, _thread_remove_pollers, thread);
+		}
 	}
 
 	/* If the poller was paused, put it on the active_pollers list so that
@@ -2629,12 +2648,6 @@ end:
 	pthread_mutex_unlock(&g_devlist_mutex);
 }
 
-struct spdk_interrupt {
-	int			efd;
-	struct spdk_thread	*thread;
-	char			name[SPDK_MAX_POLLER_NAME_LEN + 1];
-};
-
 static void
 thread_interrupt_destroy(struct spdk_thread *thread)
 {
@@ -2659,12 +2672,16 @@ static int
 thread_interrupt_msg_process(void *arg)
 {
 	struct spdk_thread *thread = arg;
+	struct spdk_thread *orig_thread;
 	uint32_t msg_count;
 	spdk_msg_fn critical_msg;
 	int rc = 0;
 	uint64_t notify = 1;
 
 	assert(spdk_interrupt_mode_is_enabled());
+
+	orig_thread = spdk_get_thread();
+	spdk_set_thread(thread);
 
 	/* There may be race between msg_acknowledge and another producer's msg_notify,
 	 * so msg_acknowledge should be applied ahead. And then check for self's msg_notify.
@@ -2687,6 +2704,18 @@ thread_interrupt_msg_process(void *arg)
 		rc = 1;
 	}
 
+	SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
+	if (spdk_unlikely(!thread->in_interrupt)) {
+		/* The thread transitioned to poll mode in a msg during the above processing.
+		 * Clear msg_fd since thread messages will be polled directly in poll mode.
+		 */
+		rc = read(thread->msg_fd, &notify, sizeof(notify));
+		if (rc < 0 && errno != EAGAIN) {
+			SPDK_ERRLOG("failed to acknowledge msg queue: %s.\n", spdk_strerror(errno));
+		}
+	}
+
+	spdk_set_thread(orig_thread);
 	return rc;
 }
 
@@ -2722,6 +2751,30 @@ thread_interrupt_create(struct spdk_thread *thread)
 }
 #endif
 
+static int
+_interrupt_wrapper(void *ctx)
+{
+	struct spdk_interrupt *intr = ctx;
+	struct spdk_thread *orig_thread, *thread;
+	int rc;
+
+	orig_thread = spdk_get_thread();
+	thread = intr->thread;
+
+	spdk_set_thread(thread);
+
+	SPDK_DTRACE_PROBE4(interrupt_fd_process, intr->name, intr->efd,
+			   intr->fn, intr->arg);
+
+	rc = intr->fn(intr->arg);
+
+	SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
+
+	spdk_set_thread(orig_thread);
+
+	return rc;
+}
+
 struct spdk_interrupt *
 spdk_interrupt_register(int efd, spdk_interrupt_fn fn,
 			void *arg, const char *name)
@@ -2755,8 +2808,10 @@ spdk_interrupt_register(int efd, spdk_interrupt_fn fn,
 
 	intr->efd = efd;
 	intr->thread = thread;
+	intr->fn = fn;
+	intr->arg = arg;
 
-	ret = spdk_fd_group_add(thread->fgrp, efd, fn, arg, name);
+	ret = spdk_fd_group_add(thread->fgrp, efd, _interrupt_wrapper, intr, intr->name);
 
 	if (ret != 0) {
 		SPDK_ERRLOG("thread %s: failed to add fd %d: %s\n",
@@ -2820,6 +2875,12 @@ int
 spdk_thread_get_interrupt_fd(struct spdk_thread *thread)
 {
 	return spdk_fd_group_get_fd(thread->fgrp);
+}
+
+struct spdk_fd_group *
+spdk_thread_get_interrupt_fd_group(struct spdk_thread *thread)
+{
+	return thread->fgrp;
 }
 
 static bool g_interrupt_mode = false;

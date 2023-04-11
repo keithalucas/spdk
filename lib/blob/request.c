@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -72,9 +72,9 @@ bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int bserrn
 	set->u.sequence.cb_fn((spdk_bs_sequence_t *)set, set->u.sequence.cb_arg, bserrno);
 }
 
-spdk_bs_sequence_t *
-bs_sequence_start(struct spdk_io_channel *_channel,
-		  struct spdk_bs_cpl *cpl)
+static inline spdk_bs_sequence_t *
+bs_sequence_start(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl,
+		  struct spdk_io_channel *back_channel)
 {
 	struct spdk_bs_channel		*channel;
 	struct spdk_bs_request_set	*set;
@@ -90,6 +90,7 @@ bs_sequence_start(struct spdk_io_channel *_channel,
 	set->cpl = *cpl;
 	set->bserrno = 0;
 	set->channel = channel;
+	set->back_channel = back_channel;
 
 	set->cb_args.cb_fn = bs_sequence_completion;
 	set->cb_args.cb_arg = set;
@@ -99,13 +100,45 @@ bs_sequence_start(struct spdk_io_channel *_channel,
 	return (spdk_bs_sequence_t *)set;
 }
 
+/* Use when performing IO directly on the blobstore (e.g. metadata - not a blob). */
+spdk_bs_sequence_t *
+bs_sequence_start_bs(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl)
+{
+	return bs_sequence_start(_channel, cpl, _channel);
+}
+
+/* Use when performing IO on a blob. */
+spdk_bs_sequence_t *
+bs_sequence_start_blob(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl,
+		       struct spdk_blob *blob)
+{
+	struct spdk_io_channel	*esnap_ch = _channel;
+
+	if (spdk_blob_is_esnap_clone(blob)) {
+		esnap_ch = blob_esnap_get_io_channel(_channel, blob);
+		if (esnap_ch == NULL) {
+			/*
+			 * The most likely reason we are here is because of some logic error
+			 * elsewhere that caused channel allocations to fail. We could get here due
+			 * to being out of memory as well. If we are out of memory, the process is
+			 * this will be just one of many problems that this process will be having.
+			 * Killing it off debug builds now due to logic errors is the right thing to
+			 * do and killing it off due to ENOMEM is no big loss.
+			 */
+			assert(false);
+			return NULL;
+		}
+	}
+	return bs_sequence_start(_channel, cpl, esnap_ch);
+}
+
 void
 bs_sequence_read_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
 			void *payload, uint64_t lba, uint32_t lba_count,
 			spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
-	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
-	struct spdk_bs_channel       *channel = set->channel;
+	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)seq;
+	struct spdk_io_channel		*back_channel = set->back_channel;
 
 	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
@@ -113,7 +146,7 @@ bs_sequence_read_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
 	set->u.sequence.cb_fn = cb_fn;
 	set->u.sequence.cb_arg = cb_arg;
 
-	bs_dev->read(bs_dev, spdk_io_channel_from_ctx(channel), payload, lba, lba_count, &set->cb_args);
+	bs_dev->read(bs_dev, back_channel, payload, lba, lba_count, &set->cb_args);
 }
 
 void
@@ -157,7 +190,7 @@ bs_sequence_readv_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
 			 spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
-	struct spdk_bs_channel       *channel = set->channel;
+	struct spdk_io_channel		*back_channel = set->back_channel;
 
 	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
@@ -167,11 +200,10 @@ bs_sequence_readv_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
 
 	if (set->ext_io_opts) {
 		assert(bs_dev->readv_ext);
-		bs_dev->readv_ext(bs_dev, spdk_io_channel_from_ctx(channel), iov, iovcnt, lba, lba_count,
+		bs_dev->readv_ext(bs_dev, back_channel, iov, iovcnt, lba, lba_count,
 				  &set->cb_args, set->ext_io_opts);
 	} else {
-		bs_dev->readv(bs_dev, spdk_io_channel_from_ctx(channel), iov, iovcnt, lba, lba_count,
-			      &set->cb_args);
+		bs_dev->readv(bs_dev, back_channel, iov, iovcnt, lba, lba_count, &set->cb_args);
 	}
 }
 
@@ -293,11 +325,18 @@ bs_batch_completion(struct spdk_io_channel *_channel,
 }
 
 spdk_bs_batch_t *
-bs_batch_open(struct spdk_io_channel *_channel,
-	      struct spdk_bs_cpl *cpl)
+bs_batch_open(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl, struct spdk_blob *blob)
 {
 	struct spdk_bs_channel		*channel;
 	struct spdk_bs_request_set	*set;
+	struct spdk_io_channel		*back_channel = _channel;
+
+	if (spdk_blob_is_esnap_clone(blob)) {
+		back_channel = blob_esnap_get_io_channel(_channel, blob);
+		if (back_channel == NULL) {
+			return NULL;
+		}
+	}
 
 	channel = spdk_io_channel_get_ctx(_channel);
 	assert(channel != NULL);
@@ -310,6 +349,7 @@ bs_batch_open(struct spdk_io_channel *_channel,
 	set->cpl = *cpl;
 	set->bserrno = 0;
 	set->channel = channel;
+	set->back_channel = back_channel;
 
 	set->u.batch.cb_fn = NULL;
 	set->u.batch.cb_arg = NULL;
@@ -328,13 +368,13 @@ bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
 		     void *payload, uint64_t lba, uint32_t lba_count)
 {
 	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)batch;
-	struct spdk_bs_channel		*channel = set->channel;
+	struct spdk_io_channel		*back_channel = set->back_channel;
 
 	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.batch.outstanding_ops++;
-	bs_dev->read(bs_dev, spdk_io_channel_from_ctx(channel), payload, lba, lba_count, &set->cb_args);
+	bs_dev->read(bs_dev, back_channel, payload, lba, lba_count, &set->cb_args);
 }
 
 void
@@ -445,6 +485,7 @@ bs_user_op_alloc(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl,
 
 	set->cpl = *cpl;
 	set->channel = channel;
+	set->back_channel = NULL;
 	set->ext_io_opts = NULL;
 
 	args = &set->u.user_op;

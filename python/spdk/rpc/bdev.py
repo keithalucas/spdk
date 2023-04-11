@@ -268,13 +268,14 @@ def bdev_ocf_flush_status(client, name):
     return client.call('bdev_ocf_flush_status', params)
 
 
-def bdev_malloc_create(client, num_blocks, block_size, name=None, uuid=None, optimal_io_boundary=None,
+def bdev_malloc_create(client, num_blocks, block_size, physical_block_size=None, name=None, uuid=None, optimal_io_boundary=None,
                        md_size=None, md_interleave=None, dif_type=None, dif_is_head_of_md=None):
     """Construct a malloc block device.
 
     Args:
         num_blocks: size of block device in blocks
         block_size: Data block size of device; must be a power of 2 and at least 512
+        physical_block_size: Physical block size of device; must be a power of 2 and at least 512 (optional)
         name: name of block device (optional)
         uuid: UUID of block device (optional)
         optimal_io_boundary: Split on optimal IO boundary, in number of blocks, default 0 (disabled, optional)
@@ -287,6 +288,8 @@ def bdev_malloc_create(client, num_blocks, block_size, name=None, uuid=None, opt
         Name of created block device.
     """
     params = {'num_blocks': num_blocks, 'block_size': block_size}
+    if physical_block_size:
+        params['physical_block_size'] = physical_block_size
     if name:
         params['name'] = name
     if uuid:
@@ -315,7 +318,7 @@ def bdev_malloc_delete(client, name):
     return client.call('bdev_malloc_delete', params)
 
 
-def bdev_null_create(client, num_blocks, block_size, name, uuid=None, md_size=None,
+def bdev_null_create(client, num_blocks, block_size, name, physical_block_size=None, uuid=None, md_size=None,
                      dif_type=None, dif_is_head_of_md=None):
     """Construct a null block device.
 
@@ -323,6 +326,7 @@ def bdev_null_create(client, num_blocks, block_size, name, uuid=None, md_size=No
         num_blocks: size of block device in blocks
         block_size: block size of device; data part size must be a power of 2 and at least 512
         name: name of block device
+        physical_block_size: physical block size of the device; data part size must be a power of 2 and at least 512 (optional)
         uuid: UUID of block device (optional)
         md_size: metadata size of device (optional)
         dif_type: protection information type (optional)
@@ -333,6 +337,8 @@ def bdev_null_create(client, num_blocks, block_size, name, uuid=None, md_size=No
     """
     params = {'name': name, 'num_blocks': num_blocks,
               'block_size': block_size}
+    if physical_block_size:
+        params['physical_block_size'] = physical_block_size
     if uuid:
         params['uuid'] = uuid
     if md_size:
@@ -1156,7 +1162,7 @@ def bdev_error_create(client, base_name):
     return client.call('bdev_error_create', params)
 
 
-def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_latency, avg_write_latency, p99_write_latency):
+def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_latency, avg_write_latency, p99_write_latency, uuid=None):
     """Construct a delay block device.
 
     Args:
@@ -1166,6 +1172,7 @@ def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_l
         p99_read_latency: complete 1% of read ops with this delay
         avg_write_latency: complete 99% of write ops with this delay
         p99_write_latency: complete 1% of write ops with this delay
+        uuid: UUID of block device (optional)
 
     Returns:
         Name of created block device.
@@ -1178,6 +1185,8 @@ def bdev_delay_create(client, base_bdev_name, name, avg_read_latency, p99_read_l
         'avg_write_latency': avg_write_latency,
         'p99_write_latency': p99_write_latency,
     }
+    if uuid:
+        params['uuid'] = uuid
     return client.call('bdev_delay_create', params)
 
 
@@ -1261,33 +1270,6 @@ def bdev_iscsi_delete(client, name):
     """
     params = {'name': name}
     return client.call('bdev_iscsi_delete', params)
-
-
-def bdev_pmem_create(client, pmem_file, name):
-    """Construct a libpmemblk block device.
-
-    Args:
-        pmem_file: path to pmemblk pool file
-        name: name of block device
-
-    Returns:
-        Name of created block device.
-    """
-    params = {
-        'pmem_file': pmem_file,
-        'name': name
-    }
-    return client.call('bdev_pmem_create', params)
-
-
-def bdev_pmem_delete(client, name):
-    """Remove pmem bdev from the system.
-
-    Args:
-        name: name of pmem bdev to delete
-    """
-    params = {'name': name}
-    return client.call('bdev_pmem_delete', params)
 
 
 def bdev_passthru_create(client, base_bdev_name, name):

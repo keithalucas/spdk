@@ -11,7 +11,6 @@
 
 #include "spdk/bdev_module.h"
 #include "nvmf/subsystem.c"
-#include <uuid/uuid.h>
 
 SPDK_LOG_REGISTER_COMPONENT(nvmf)
 
@@ -97,15 +96,17 @@ nvmf_transport_listener_discover(struct spdk_nvmf_transport *transport,
 
 static struct spdk_nvmf_transport g_transport = {};
 
-struct spdk_nvmf_transport *
-spdk_nvmf_transport_create(const char *transport_name,
-			   struct spdk_nvmf_transport_opts *tprt_opts)
+int
+spdk_nvmf_transport_create_async(const char *transport_name,
+				 struct spdk_nvmf_transport_opts *tprt_opts,
+				 spdk_nvmf_transport_create_done_cb cb_fn, void *cb_arg)
 {
 	if (strcasecmp(transport_name, spdk_nvme_transport_id_trtype_str(SPDK_NVME_TRANSPORT_RDMA))) {
-		return &g_transport;
+		cb_fn(cb_arg, &g_transport);
+		return 0;
 	}
 
-	return NULL;
+	return -1;
 }
 
 struct spdk_nvmf_subsystem *
@@ -419,7 +420,7 @@ nvmf_test_create_subsystem(void)
 	CU_ASSERT(subsystem == NULL);
 
 	/* Valid name using uuid format */
-	snprintf(nqn, sizeof(nqn), "nqn.2014-08.org.nvmexpress:uuid:11111111-aaaa-bbdd-FFEE-123456789abc");
+	snprintf(nqn, sizeof(nqn), "nqn.2014-08.org.nvmexpress:uuid:ff9b6406-0fc8-4779-80ca-4dca14bda0d2");
 	subsystem = spdk_nvmf_subsystem_create(&tgt, nqn, SPDK_NVMF_SUBTYPE_NVME, 0);
 	SPDK_CU_ASSERT_FATAL(subsystem != NULL);
 	CU_ASSERT_STRING_EQUAL(subsystem->subnqn, nqn);
@@ -441,17 +442,17 @@ nvmf_test_create_subsystem(void)
 
 	/* Invalid uuid (too long) */
 	snprintf(nqn, sizeof(nqn),
-		 "nqn.2014-08.org.nvmexpress:uuid:11111111-aaaa-bbdd-FFEE-123456789abcdef");
+		 "nqn.2014-08.org.nvmexpress:uuid:ff9b6406-0fc8-4779-80ca-4dca14bda0d2aaaa");
 	subsystem = spdk_nvmf_subsystem_create(&tgt, nqn, SPDK_NVMF_SUBTYPE_NVME, 0);
 	SPDK_CU_ASSERT_FATAL(subsystem == NULL);
 
 	/* Invalid uuid (dashes placed incorrectly) */
-	snprintf(nqn, sizeof(nqn), "nqn.2014-08.org.nvmexpress:uuid:111111-11aaaa-bbdd-FFEE-123456789abc");
+	snprintf(nqn, sizeof(nqn), "nqn.2014-08.org.nvmexpress:uuid:ff9b64-060fc8-4779-80ca-4dca14bda0d2");
 	subsystem = spdk_nvmf_subsystem_create(&tgt, nqn, SPDK_NVMF_SUBTYPE_NVME, 0);
 	SPDK_CU_ASSERT_FATAL(subsystem == NULL);
 
 	/* Invalid uuid (invalid characters in uuid) */
-	snprintf(nqn, sizeof(nqn), "nqn.2014-08.org.nvmexpress:uuid:111hg111-aaaa-bbdd-FFEE-123456789abc");
+	snprintf(nqn, sizeof(nqn), "nqn.2014-08.org.nvmexpress:uuid:ff9hg406-0fc8-4779-80ca-4dca14bda0d2");
 	subsystem = spdk_nvmf_subsystem_create(&tgt, nqn, SPDK_NVMF_SUBTYPE_NVME, 0);
 	SPDK_CU_ASSERT_FATAL(subsystem == NULL);
 
@@ -1591,7 +1592,7 @@ test_nvmf_valid_nqn(void)
 	struct spdk_uuid s_uuid = {};
 
 	spdk_uuid_generate(&s_uuid);
-	uuid_unparse((void *)&s_uuid, uuid);
+	spdk_uuid_fmt_lower(uuid, sizeof(uuid), &s_uuid);
 
 	/* discovery nqn */
 	snprintf(nqn, sizeof(nqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
@@ -1657,13 +1658,13 @@ test_nvmf_ns_reservation_restore(void)
 
 	/* Generate and prepare uuids, make sure bdev and info uuid are the same */
 	spdk_uuid_generate(&s_uuid);
-	uuid_unparse((void *)&s_uuid, uuid);
+	spdk_uuid_fmt_lower(uuid, sizeof(uuid), &s_uuid);
 	snprintf(info.holder_uuid, SPDK_UUID_STRING_LEN, "%s", uuid);
 	snprintf(info.bdev_uuid, SPDK_UUID_STRING_LEN, "%s", uuid);
 	snprintf(info.registrants[0].host_uuid, SPDK_UUID_STRING_LEN, "%s", uuid);
 	spdk_uuid_copy(&bdev.uuid, &s_uuid);
 	spdk_uuid_generate(&s_uuid);
-	uuid_unparse((void *)&s_uuid, uuid);
+	spdk_uuid_fmt_lower(uuid, sizeof(uuid), &s_uuid);
 	snprintf(info.registrants[1].host_uuid, SPDK_UUID_STRING_LEN, "%s", uuid);
 
 	/* info->rkey not exist in registrants */
@@ -1693,7 +1694,7 @@ test_nvmf_ns_reservation_restore(void)
 
 	/* Existing bdev UUID is different with configuration */
 	spdk_uuid_generate(&s_uuid);
-	uuid_unparse((void *)&s_uuid, uuid);
+	spdk_uuid_fmt_lower(uuid, sizeof(uuid), &s_uuid);
 	snprintf(info.bdev_uuid, SPDK_UUID_STRING_LEN, "%s", uuid);
 	spdk_uuid_generate(&s_uuid);
 	spdk_uuid_copy(&bdev.uuid, &s_uuid);

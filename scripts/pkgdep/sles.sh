@@ -6,7 +6,7 @@
 #
 # Minimal install
 zypper install -y gcc gcc-c++ make cunit-devel libaio-devel libopenssl-devel \
-	libuuid-devel python-base ncurses-devel libjson-c-devel libcmocka-devel \
+	libuuid-devel python3-base ncurses-devel libjson-c-devel libcmocka-devel \
 	ninja meson python3-pyelftools
 # Additional dependencies for DPDK
 zypper install -y libnuma-devel nasm
@@ -19,7 +19,6 @@ if [[ $INSTALL_DEV_TOOLS == "true" ]]; then
 fi
 if [[ $INSTALL_PMEM == "true" ]]; then
 	# Additional dependencies for building pmem based backends
-	zypper install -y libpmemblk-devel
 	zypper install -y libpmemobj-devel
 fi
 if [[ $INSTALL_FUSE == "true" ]]; then

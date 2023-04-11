@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #ifndef SPDK_BLOBSTORE_H
@@ -193,6 +193,17 @@ struct spdk_blob_store {
 	TAILQ_HEAD(, spdk_blob_list)	snapshots;
 
 	bool				clean;
+
+	spdk_bs_esnap_dev_create	esnap_bs_dev_create;
+	void				*esnap_ctx;
+
+	/* If external snapshot channels are being destroyed while
+	 * the blobstore is unloaded, the unload is deferred until
+	 * after the channel destruction completes.
+	 */
+	uint32_t			esnap_channels_unloading;
+	spdk_bs_op_complete		esnap_unload_cb_fn;
+	void				*esnap_unload_cb_arg;
 };
 
 struct spdk_bs_channel {
@@ -209,6 +220,8 @@ struct spdk_bs_channel {
 
 	TAILQ_HEAD(, spdk_bs_request_set) need_cluster_alloc;
 	TAILQ_HEAD(, spdk_bs_request_set) queued_io;
+
+	RB_HEAD(blob_esnap_channel_tree, blob_esnap_channel) esnap_channels;
 };
 
 /** operation type */
@@ -226,6 +239,7 @@ enum spdk_blob_op_type {
 #define BLOB_SNAPSHOT "SNAP"
 #define SNAPSHOT_IN_PROGRESS "SNAPTMP"
 #define SNAPSHOT_PENDING_REMOVAL "SNAPRM"
+#define BLOB_EXTERNAL_SNAPSHOT_ID "EXTSNAP"
 
 struct spdk_blob_bs_dev {
 	struct spdk_bs_dev bs_dev;
@@ -320,10 +334,12 @@ struct spdk_blob_md_descriptor_extent_page {
 	uint32_t	cluster_idx[0];
 };
 
-#define SPDK_BLOB_THIN_PROV (1ULL << 0)
-#define SPDK_BLOB_INTERNAL_XATTR (1ULL << 1)
-#define SPDK_BLOB_EXTENT_TABLE (1ULL << 2)
-#define SPDK_BLOB_INVALID_FLAGS_MASK	(SPDK_BLOB_THIN_PROV | SPDK_BLOB_INTERNAL_XATTR | SPDK_BLOB_EXTENT_TABLE)
+#define SPDK_BLOB_THIN_PROV		(1ULL << 0)
+#define SPDK_BLOB_INTERNAL_XATTR	(1ULL << 1)
+#define SPDK_BLOB_EXTENT_TABLE		(1ULL << 2)
+#define SPDK_BLOB_EXTERNAL_SNAPSHOT	(1ULL << 3)
+#define SPDK_BLOB_INVALID_FLAGS_MASK	(SPDK_BLOB_THIN_PROV | SPDK_BLOB_INTERNAL_XATTR | \
+					 SPDK_BLOB_EXTENT_TABLE | SPDK_BLOB_EXTERNAL_SNAPSHOT)
 
 #define SPDK_BLOB_READ_ONLY (1ULL << 0)
 #define SPDK_BLOB_DATA_RO_FLAGS_MASK	SPDK_BLOB_READ_ONLY
@@ -421,6 +437,8 @@ SPDK_STATIC_ASSERT(sizeof(struct spdk_bs_super_block) == 0x1000, "Invalid super 
 
 struct spdk_bs_dev *bs_create_zeroes_dev(void);
 struct spdk_bs_dev *bs_create_blob_bs_dev(struct spdk_blob *blob);
+struct spdk_io_channel *blob_esnap_get_io_channel(struct spdk_io_channel *ch,
+		struct spdk_blob *blob);
 
 /* Unit Conversions
  *

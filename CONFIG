@@ -126,10 +126,6 @@ CONFIG_VIRTIO=y
 CONFIG_VFIO_USER=n
 CONFIG_VFIO_USER_DIR=
 
-# Build with PMDK backends
-CONFIG_PMDK=n
-CONFIG_PMDK_DIR=
-
 # Build with xNVMe
 CONFIG_XNVME=n
 
@@ -203,6 +199,9 @@ CONFIG_IDXD_KERNEL=n
 
 # arc4random is available in stdlib.h
 CONFIG_HAVE_ARC4RANDOM=n
+
+# uuid_generate_sha1 is available in uuid/uuid.h
+CONFIG_HAVE_UUID_GENERATE_SHA1=n
 
 # Is DPDK using libbsd?
 CONFIG_HAVE_LIBBSD=n

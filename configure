@@ -71,9 +71,6 @@ function usage() {
 	echo "                           vfio-user initiator is always built-in in Linux."
 	echo "                           example: /usr/src/libvfio-user"
 	echo " --without-vfio-user       No path required."
-	echo " --with-pmdk[=DIR]         Build persistent memory bdev. (Deprecated)
-					 example: /usr/share/pmdk"
-	echo " --without-pmdk		 No path required."
 	echo " --with-vbdev-compress     Build vbdev compression module and dependencies."
 	echo " --without-vbdev-compress  No path required."
 	echo " --with-dpdk-compressdev   Build accel DPDK compression module and dependencies."
@@ -527,18 +524,6 @@ for i in "$@"; do
 		--without-vfio-user)
 			CONFIG[VFIO_USER]=n
 			;;
-		--with-pmdk)
-			CONFIG[PMDK]=y
-			CONFIG[PMDK_DIR]=""
-			;;
-		--with-pmdk=*)
-			CONFIG[PMDK]=y
-			check_dir "$i"
-			CONFIG[PMDK_DIR]=$(readlink -f ${i#*=})
-			;;
-		--without-pmdk)
-			CONFIG[PMDK]=n
-			;;
 		--with-vbdev-compress)
 			CONFIG[VBDEV_COMPRESS]=y
 			;;
@@ -906,17 +891,6 @@ if [[ "${CONFIG[FC]}" = "y" ]]; then
 	fi
 fi
 
-if [[ "${CONFIG[PMDK]}" = "y" ]]; then
-	echo "WARNING: PMDK - bdev_pmem is deprecated."
-	echo "WARNING: PMDK - ACCEL_FLAG_PERSISTENT in accel_sw module is deprecated."
-	if ! echo -e '#include <libpmemblk.h>\nint main(void) { return 0; }\n' \
-		| "${BUILD_CMD[@]}" -lpmemblk - 2> /dev/null; then
-		echo "--with-pmdk requires libpmemblk."
-		echo "Please install then re-run this script."
-		exit 1
-	fi
-fi
-
 function dpdk_version() {
 	# Check DPDK version to determine if mlx5_pci driver is supported
 	local dpdk_ver="none"
@@ -1109,8 +1083,12 @@ if echo -e '#include <stdlib.h>\nint main(void) { arc4random(); return 0; }\n' \
 	CONFIG[HAVE_ARC4RANDOM]="y"
 fi
 
+if echo -e '#include <uuid/uuid.h>\nint main(void) { uuid_generate_sha1(NULL, NULL, NULL, 0); return 0; }\n' \
+	| "${BUILD_CMD[@]}" - -luuid 2> /dev/null; then
+	CONFIG[HAVE_UUID_GENERATE_SHA1]="y"
+fi
+
 if [[ "${CONFIG[OCF]}" = "y" ]]; then
-	echo "WARNING: OCF - bdev_ocf is deprecated."
 	# If OCF_PATH is a file, assume it is a library and use it to compile with
 	if [ -f ${CONFIG[OCF_PATH]} ]; then
 		CONFIG[CUSTOMOCF]=y

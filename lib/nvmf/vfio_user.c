@@ -605,6 +605,25 @@ cq_tail_advance(struct nvmf_vfio_user_cq *cq)
 	}
 }
 
+static uint32_t
+cq_free_slots(struct nvmf_vfio_user_cq *cq)
+{
+	uint32_t free_slots;
+
+	assert(cq != NULL);
+
+	if (cq->tail == cq->last_head) {
+		free_slots = cq->size;
+	} else if (cq->tail > cq->last_head) {
+		free_slots = cq->size - (cq->tail - cq->last_head);
+	} else {
+		free_slots = cq->last_head - cq->tail;
+	}
+	assert(free_slots > 0);
+
+	return free_slots - 1;
+}
+
 /*
  * As per NVMe Base spec 3.3.1.2.1, we are supposed to implement CQ flow
  * control: if there is no space in the CQ, we should wait until there is.
@@ -619,22 +638,18 @@ cq_tail_advance(struct nvmf_vfio_user_cq *cq)
 static inline bool
 cq_is_full(struct nvmf_vfio_user_cq *cq)
 {
-	uint32_t qindex;
+	uint32_t free_cq_slots;
 
 	assert(cq != NULL);
 
-	qindex = *cq_tailp(cq) + 1;
-	if (spdk_unlikely(qindex == cq->size)) {
-		qindex = 0;
+	free_cq_slots = cq_free_slots(cq);
+
+	if (spdk_unlikely(free_cq_slots == 0)) {
+		cq->last_head = *cq_dbl_headp(cq);
+		free_cq_slots = cq_free_slots(cq);
 	}
 
-	if (qindex != cq->last_head) {
-		return false;
-	}
-
-	cq->last_head = *cq_dbl_headp(cq);
-
-	return qindex == cq->last_head;
+	return free_cq_slots == 0;
 }
 
 static bool
@@ -2513,7 +2528,9 @@ handle_sq_tdbl_write(struct nvmf_vfio_user_ctrlr *ctrlr, const uint32_t new_tail
 		     struct nvmf_vfio_user_sq *sq)
 {
 	struct spdk_nvme_cmd *queue;
+	struct nvmf_vfio_user_cq *cq = ctrlr->cqs[sq->cqid];
 	int count = 0;
+	uint32_t free_cq_slots;
 
 	assert(ctrlr != NULL);
 	assert(sq != NULL);
@@ -2526,11 +2543,38 @@ handle_sq_tdbl_write(struct nvmf_vfio_user_ctrlr *ctrlr, const uint32_t new_tail
 		sq->need_rearm = true;
 	}
 
+	free_cq_slots = cq_free_slots(cq);
 	queue = q_addr(&sq->mapping);
 	while (*sq_headp(sq) != new_tail) {
 		int err;
-		struct spdk_nvme_cmd *cmd = &queue[*sq_headp(sq)];
+		struct spdk_nvme_cmd *cmd;
 
+		/*
+		 * Linux host nvme driver can submit cmd's more than free cq slots
+		 * available. So process only those who have cq slots available.
+		 */
+		if (free_cq_slots-- == 0) {
+			cq->last_head = *cq_dbl_headp(cq);
+
+			free_cq_slots = cq_free_slots(cq);
+			if (free_cq_slots > 0) {
+				continue;
+			}
+
+			/*
+			 * If there are no free cq slots then kick interrupt FD to loop
+			 * again to process remaining sq cmds.
+			 * In case of polling mode we will process remaining sq cmds during
+			 * next polling interation.
+			 * sq head is advanced only for consumed commands.
+			 */
+			if (in_interrupt_mode(ctrlr->transport)) {
+				eventfd_write(ctrlr->intr_fd, 1);
+			}
+			break;
+		}
+
+		cmd = &queue[*sq_headp(sq)];
 		count++;
 
 		/*
@@ -2752,7 +2796,7 @@ disable_ctrlr(struct nvmf_vfio_user_ctrlr *vu_ctrlr)
 	 * For PCIe controller reset or shutdown, we will drop all AER
 	 * responses.
 	 */
-	nvmf_ctrlr_abort_aer(vu_ctrlr->ctrlr);
+	spdk_nvmf_ctrlr_abort_aer(vu_ctrlr->ctrlr);
 
 	/* Free the shadow doorbell buffer. */
 	vfio_user_ctrlr_switch_doorbells(vu_ctrlr, false);
@@ -5351,6 +5395,11 @@ get_nvmf_io_req_length(struct spdk_nvmf_request *req)
 		return nr * sizeof(struct spdk_nvme_dsm_range);
 	}
 
+	if (cmd->opc == SPDK_NVME_OPC_COPY) {
+		nr = (cmd->cdw12 & 0x000000ffu) + 1;
+		return nr * sizeof(struct spdk_nvme_scc_source_range);
+	}
+
 	nlb = (cmd->cdw12 & 0x0000ffffu) + 1;
 	return nlb * spdk_bdev_get_block_size(ns->bdev);
 }
@@ -5609,13 +5658,9 @@ nvmf_vfio_user_sq_poll(struct nvmf_vfio_user_sq *sq)
 
 	new_tail = new_tail & 0xffffu;
 	if (spdk_unlikely(new_tail >= sq->size)) {
-		union spdk_nvme_async_event_completion event = {};
-
 		SPDK_DEBUGLOG(nvmf_vfio, "%s: invalid sqid:%u doorbell value %u\n", ctrlr_id(ctrlr), sq->qid,
 			      new_tail);
-		event.bits.async_event_type = SPDK_NVME_ASYNC_EVENT_TYPE_ERROR;
-		event.bits.async_event_info = SPDK_NVME_ASYNC_EVENT_INVALID_DB_WRITE;
-		nvmf_ctrlr_async_event_error_event(ctrlr->ctrlr, event);
+		spdk_nvmf_ctrlr_async_event_error_event(ctrlr->ctrlr, SPDK_NVME_ASYNC_EVENT_INVALID_DB_WRITE);
 
 		return -1;
 	}

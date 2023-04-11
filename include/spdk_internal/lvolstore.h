@@ -1,6 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #ifndef SPDK_INTERNAL_LVOLSTORE_H
@@ -26,11 +27,10 @@ struct spdk_lvs_req {
 };
 
 struct spdk_lvs_grow_req {
+	struct spdk_lvs_req	base;
 	spdk_lvs_op_complete	cb_fn;
 	void			*cb_arg;
-	struct spdk_lvol_store	*lvol_store;
 	struct lvol_store_bdev	*lvs_bdev;
-	int			lvserrno;
 	int			lvol_cnt;
 };
 
@@ -81,10 +81,13 @@ struct spdk_lvol_store {
 	int				lvols_opened;
 	TAILQ_HEAD(, spdk_lvol)		lvols;
 	TAILQ_HEAD(, spdk_lvol)		pending_lvols;
+	TAILQ_HEAD(, spdk_lvol)		retry_open_lvols;
+	bool				load_esnaps;
 	bool				on_list;
 	TAILQ_ENTRY(spdk_lvol_store)	link;
 	char				name[SPDK_LVS_NAME_MAX];
 	char				new_name[SPDK_LVS_NAME_MAX];
+	spdk_bs_esnap_dev_create	esnap_bs_dev_create;
 };
 
 struct spdk_lvol {
@@ -95,7 +98,6 @@ struct spdk_lvol {
 	char				name[SPDK_LVOL_NAME_MAX];
 	struct spdk_uuid		uuid;
 	char				uuid_str[SPDK_UUID_STRING_LEN];
-	bool				thin_provision;
 	struct spdk_bdev		*bdev;
 	int				ref_count;
 	bool				action_in_progress;

@@ -55,6 +55,26 @@ DEFINE_STUB(spdk_bdev_register, int, (struct spdk_bdev *vbdev), 0);
 DEFINE_STUB_V(spdk_bdev_destruct_done, (struct spdk_bdev *bdev, int bdeverrno));
 
 DEFINE_STUB(spdk_accel_crypto_key_destroy, int, (struct spdk_accel_crypto_key *key), 0);
+DEFINE_STUB(spdk_accel_append_decrypt, int,
+	    (struct spdk_accel_sequence **seq, struct spdk_io_channel *ch,
+	     struct spdk_accel_crypto_key *key, struct iovec *dst_iovs,
+	     uint32_t dst_iovcnt, struct spdk_memory_domain *dst_domain, void *dst_domain_ctx,
+	     struct iovec *src_iovs, uint32_t src_iovcnt, struct spdk_memory_domain *src_domain,
+	     void *src_domain_ctx, uint64_t iv, uint32_t block_size, int flags,
+	     spdk_accel_step_cb cb_fn, void *cb_arg), 0);
+DEFINE_STUB(spdk_accel_append_encrypt, int,
+	    (struct spdk_accel_sequence **seq, struct spdk_io_channel *ch,
+	     struct spdk_accel_crypto_key *key, struct iovec *dst_iovs,
+	     uint32_t dst_iovcnt, struct spdk_memory_domain *dst_domain, void *dst_domain_ctx,
+	     struct iovec *src_iovs, uint32_t src_iovcnt, struct spdk_memory_domain *src_domain,
+	     void *src_domain_ctx, uint64_t iv, uint32_t block_size, int flags,
+	     spdk_accel_step_cb cb_fn, void *cb_arg), 0);
+DEFINE_STUB_V(spdk_accel_sequence_abort, (struct spdk_accel_sequence *seq));
+DEFINE_STUB_V(spdk_accel_put_buf, (struct spdk_io_channel *ch, void *buf,
+				   struct spdk_memory_domain *domain, void *domain_ctx));
+DEFINE_STUB(spdk_bdev_get_memory_domains, int,
+	    (struct spdk_bdev *bdev, struct spdk_memory_domain **domains, int sz), 0);
+DEFINE_STUB(spdk_accel_get_memory_domain, struct spdk_memory_domain *, (void), (void *)0xdeadbeef);
 
 /* global vars and setup/cleanup functions used for all test functions */
 struct spdk_bdev_io *g_bdev_io;
@@ -64,10 +84,14 @@ struct spdk_io_channel *g_io_ch;
 struct vbdev_crypto g_crypto_bdev;
 struct vbdev_crypto_opts g_crypto_bdev_opts;
 
-void
-spdk_bdev_io_get_aux_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_aux_buf_cb cb)
+int
+spdk_accel_get_buf(struct spdk_io_channel *ch, uint64_t len, void **buf,
+		   struct spdk_memory_domain **domain, void **domain_ctx)
 {
-	cb(g_io_ch, g_bdev_io, (void *)0xDEADBEEF);
+	*buf = (void *)0xdeadbeef;
+	*domain = (void *)0xbeefdead;
+
+	return 0;
 }
 
 void
@@ -108,27 +132,29 @@ ut_vbdev_crypto_bdev_cpl(spdk_bdev_io_completion_cb cb_fn, struct spdk_bdev_io *
 }
 
 /* Mock these functions to call the callback and then return the value we require */
-DEFINE_RETURN_MOCK(spdk_bdev_readv_blocks, int);
+DEFINE_RETURN_MOCK(spdk_bdev_readv_blocks_ext, int);
 int
-spdk_bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-		       struct iovec *iov, int iovcnt,
-		       uint64_t offset_blocks, uint64_t num_blocks,
-		       spdk_bdev_io_completion_cb cb, void *cb_arg)
+spdk_bdev_readv_blocks_ext(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			   struct iovec *iov, int iovcnt,
+			   uint64_t offset_blocks, uint64_t num_blocks,
+			   spdk_bdev_io_completion_cb cb, void *cb_arg,
+			   struct spdk_bdev_ext_io_opts *opts)
 {
-	HANDLE_RETURN_MOCK(spdk_bdev_readv_blocks);
-	ut_vbdev_crypto_bdev_cpl(cb, g_bdev_io, !ut_spdk_bdev_readv_blocks, cb_arg);
+	HANDLE_RETURN_MOCK(spdk_bdev_readv_blocks_ext);
+	ut_vbdev_crypto_bdev_cpl(cb, g_bdev_io, !ut_spdk_bdev_readv_blocks_ext, cb_arg);
 	return 0;
 }
 
-DEFINE_RETURN_MOCK(spdk_bdev_writev_blocks, int);
+DEFINE_RETURN_MOCK(spdk_bdev_writev_blocks_ext, int);
 int
-spdk_bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			struct iovec *iov, int iovcnt,
-			uint64_t offset_blocks, uint64_t num_blocks,
-			spdk_bdev_io_completion_cb cb, void *cb_arg)
+spdk_bdev_writev_blocks_ext(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			    struct iovec *iov, int iovcnt,
+			    uint64_t offset_blocks, uint64_t num_blocks,
+			    spdk_bdev_io_completion_cb cb, void *cb_arg,
+			    struct spdk_bdev_ext_io_opts *opts)
 {
-	HANDLE_RETURN_MOCK(spdk_bdev_writev_blocks);
-	ut_vbdev_crypto_bdev_cpl(cb, g_bdev_io, !ut_spdk_bdev_writev_blocks, cb_arg);
+	HANDLE_RETURN_MOCK(spdk_bdev_writev_blocks_ext);
+	ut_vbdev_crypto_bdev_cpl(cb, g_bdev_io, !ut_spdk_bdev_writev_blocks_ext, cb_arg);
 	return 0;
 }
 
@@ -178,60 +204,6 @@ struct ut_vbdev_crypto_accel_cpl_args {
 	int rc;
 };
 
-static void
-_vbdev_crypto_ut_accel_cpl(void *arg)
-{
-	struct ut_vbdev_crypto_accel_cpl_args *cpl_args = arg;
-
-	cpl_args->cb_fn(cpl_args->cb_arg, cpl_args->rc);
-	free(cpl_args);
-}
-
-static void
-vbdev_crypto_ut_accel_cpl(spdk_accel_completion_cb cb_fn, void *cb_arg, int rc)
-{
-	struct ut_vbdev_crypto_accel_cpl_args *cpl_args = calloc(1, sizeof(*cpl_args));
-
-	SPDK_CU_ASSERT_FATAL(cpl_args);
-	cpl_args->cb_fn = cb_fn;
-	cpl_args->cb_arg = cb_arg;
-	cpl_args->rc = rc;
-
-	spdk_thread_send_msg(spdk_get_thread(), _vbdev_crypto_ut_accel_cpl, cpl_args);
-}
-
-DEFINE_RETURN_MOCK(spdk_accel_submit_encrypt, int);
-int ut_spdk_accel_submit_encrypt_cb_rc = 0;
-int
-spdk_accel_submit_encrypt(struct spdk_io_channel *ch, struct spdk_accel_crypto_key *key,
-			  struct iovec *dst_iovs, uint32_t dst_iovcnt,
-			  struct iovec *src_iovs, uint32_t src_iovcnt,
-			  uint64_t iv, uint32_t block_size, int flags,
-			  spdk_accel_completion_cb cb_fn, void *cb_arg)
-{
-	HANDLE_RETURN_MOCK(spdk_accel_submit_encrypt);
-	/* We must not call cb_fn immediately */
-	vbdev_crypto_ut_accel_cpl(cb_fn, cb_arg, ut_spdk_accel_submit_encrypt_cb_rc);
-
-	return 0;
-}
-
-int ut_spdk_accel_submit_decrypt_cb_rc;
-DEFINE_RETURN_MOCK(spdk_accel_submit_decrypt, int);
-int
-spdk_accel_submit_decrypt(struct spdk_io_channel *ch, struct spdk_accel_crypto_key *key,
-			  struct iovec *dst_iovs, uint32_t dst_iovcnt,
-			  struct iovec *src_iovs, uint32_t src_iovcnt,
-			  uint64_t iv, uint32_t block_size, int flags,
-			  spdk_accel_completion_cb cb_fn, void *cb_arg)
-{
-	HANDLE_RETURN_MOCK(spdk_accel_submit_decrypt);
-	/* We must not call cb_fn immediately */
-	vbdev_crypto_ut_accel_cpl(cb_fn, cb_arg, ut_spdk_accel_submit_decrypt_cb_rc);
-
-	return 0;
-}
-
 struct spdk_io_channel *spdk_accel_get_io_channel(void)
 {
 	return (struct spdk_io_channel *)0xfeedbeef;
@@ -254,7 +226,6 @@ test_setup(void)
 	g_io_ctx->crypto_ch = g_crypto_ch;
 	g_io_ctx->crypto_bdev = &g_crypto_bdev;
 	g_io_ctx->crypto_bdev->opts = &g_crypto_bdev_opts;
-	TAILQ_INIT(&g_crypto_ch->in_accel_fw);
 
 	return 0;
 }
@@ -282,7 +253,7 @@ test_error_paths(void)
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE;
 
 	/* test error returned by accel fw */
-	MOCK_SET(spdk_accel_submit_encrypt, -ENOMEM);
+	MOCK_SET(spdk_accel_append_encrypt, -ENOMEM);
 	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_io_ctx->bdev_io_wait.bdev == &g_crypto_bdev.crypto_bdev);
@@ -291,22 +262,14 @@ test_error_paths(void)
 	CU_ASSERT(g_io_ctx->resubmit_state == CRYPTO_IO_NEW);
 	memset(&g_io_ctx->bdev_io_wait, 0, sizeof(g_io_ctx->bdev_io_wait));
 
-	MOCK_SET(spdk_accel_submit_encrypt, -EINVAL);
+	MOCK_SET(spdk_accel_append_encrypt, -EINVAL);
 	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	MOCK_CLEAR(spdk_accel_submit_encrypt);
-
-	/* Test error returned in accel cpl cb */
-	ut_spdk_accel_submit_encrypt_cb_rc = -EINVAL;
-	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
-	poll_threads();
-	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	ut_spdk_accel_submit_encrypt_cb_rc = 0;
+	MOCK_SET(spdk_accel_append_encrypt, 0);
 
 	/* Test error returned from bdev */
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	MOCK_SET(spdk_bdev_writev_blocks, -ENOMEM);
+	MOCK_SET(spdk_bdev_writev_blocks_ext, -ENOMEM);
 	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
 	poll_threads();
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
@@ -315,82 +278,72 @@ test_error_paths(void)
 	CU_ASSERT(g_io_ctx->bdev_io_wait.cb_arg == g_bdev_io);
 	CU_ASSERT(g_io_ctx->resubmit_state == CRYPTO_IO_ENCRYPT_DONE);
 	memset(&g_io_ctx->bdev_io_wait, 0, sizeof(g_io_ctx->bdev_io_wait));
-	MOCK_CLEAR(spdk_bdev_readv_blocks);
+	MOCK_CLEAR(spdk_bdev_readv_blocks_ext);
 
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	MOCK_SET(spdk_bdev_writev_blocks, -EINVAL);
+	MOCK_SET(spdk_bdev_writev_blocks_ext, -EINVAL);
 	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
 	poll_threads();
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	MOCK_CLEAR(spdk_bdev_writev_blocks);
+	MOCK_CLEAR(spdk_bdev_writev_blocks_ext);
 
 	/* Test error returned in bdev cpl */
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	ut_spdk_bdev_writev_blocks = -EINVAL;
+	ut_spdk_bdev_writev_blocks_ext = -EINVAL;
 	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
 	poll_threads();
 	poll_threads();
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	ut_spdk_bdev_writev_blocks = 0;
+	ut_spdk_bdev_writev_blocks_ext = 0;
 
 	/* the same for read path */
 	/* Test error returned from bdev */
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_READ;
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
 
-	MOCK_SET(spdk_bdev_readv_blocks, -ENOMEM);
+	MOCK_SET(spdk_bdev_readv_blocks_ext, -ENOMEM);
 	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
+	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(g_io_ctx->bdev_io_wait.bdev == &g_crypto_bdev.crypto_bdev);
+	CU_ASSERT(g_io_ctx->bdev_io_wait.cb_fn == vbdev_crypto_resubmit_io);
+	CU_ASSERT(g_io_ctx->bdev_io_wait.cb_arg == g_bdev_io);
+	CU_ASSERT(g_io_ctx->resubmit_state == CRYPTO_IO_DECRYPT_DONE);
+	memset(&g_io_ctx->bdev_io_wait, 0, sizeof(g_io_ctx->bdev_io_wait));
+	MOCK_CLEAR(spdk_bdev_readv_blocks_ext);
+
+	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
+	MOCK_SET(spdk_bdev_readv_blocks_ext, -EINVAL);
+	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
+	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
+	MOCK_CLEAR(spdk_bdev_readv_blocks_ext);
+
+	/* Test error returned in bdev cpl */
+	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
+	ut_spdk_bdev_readv_blocks_ext = -EINVAL;
+	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
+	poll_threads();
+	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
+	ut_spdk_bdev_readv_blocks_ext = 0;
+
+	/* test error returned by accel fw */
+	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
+	MOCK_SET(spdk_accel_append_decrypt, -ENOMEM);
+	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
+	poll_threads();
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_io_ctx->bdev_io_wait.bdev == &g_crypto_bdev.crypto_bdev);
 	CU_ASSERT(g_io_ctx->bdev_io_wait.cb_fn == vbdev_crypto_resubmit_io);
 	CU_ASSERT(g_io_ctx->bdev_io_wait.cb_arg == g_bdev_io);
 	CU_ASSERT(g_io_ctx->resubmit_state == CRYPTO_IO_NEW);
 	memset(&g_io_ctx->bdev_io_wait, 0, sizeof(g_io_ctx->bdev_io_wait));
-	MOCK_CLEAR(spdk_bdev_readv_blocks);
-
-	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	MOCK_SET(spdk_bdev_readv_blocks, -EINVAL);
-	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
-	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	MOCK_CLEAR(spdk_bdev_readv_blocks);
-
-	/* Test error returned in bdev cpl */
-	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	ut_spdk_bdev_readv_blocks = -EINVAL;
-	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
-	poll_threads();
-	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	ut_spdk_bdev_readv_blocks = 0;
-
-	/* test error returned by accel fw */
-	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	MOCK_SET(spdk_accel_submit_decrypt, -ENOMEM);
-	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
-	poll_threads();
-	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
-	CU_ASSERT(g_io_ctx->bdev_io_wait.bdev == &g_crypto_bdev.crypto_bdev);
-	CU_ASSERT(g_io_ctx->bdev_io_wait.cb_fn == vbdev_crypto_resubmit_io);
-	CU_ASSERT(g_io_ctx->bdev_io_wait.cb_arg == g_bdev_io);
-	CU_ASSERT(g_io_ctx->resubmit_state == CRYPTO_IO_READ_DONE);
-	memset(&g_io_ctx->bdev_io_wait, 0, sizeof(g_io_ctx->bdev_io_wait));
-	MOCK_CLEAR(spdk_accel_submit_decrypt);
-
-	/* test error returned in accel cpl */
-	ut_spdk_accel_submit_decrypt_cb_rc = -EINVAL;
-	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
-	poll_threads();
-	poll_threads();
-	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	ut_spdk_accel_submit_decrypt_cb_rc = 0;
-
+	MOCK_SET(spdk_accel_append_decrypt, 0);
 }
 
 static void
 test_simple_write(void)
 {
 	/* Single element block size write */
-	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
+	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_PENDING;
 	g_bdev_io->u.bdev.iovcnt = 1;
 	g_bdev_io->u.bdev.num_blocks = 1;
 	g_bdev_io->u.bdev.offset_blocks = 0;
@@ -472,17 +425,11 @@ test_reset(void)
 static void
 test_crypto_op_complete(void)
 {
-	/* Make sure completion code respects failure. */
-	g_completion_called = false;
-	_crypto_operation_complete(g_bdev_io, -1);
-	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	CU_ASSERT(g_completion_called == true);
-
 	/* Test read completion. */
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_READ;
 	g_completion_called = false;
-	_crypto_operation_complete(g_bdev_io, 0);
+	_complete_internal_io(NULL, true, g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_completion_called == true);
 
@@ -490,8 +437,8 @@ test_crypto_op_complete(void)
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE;
 	g_completion_called = false;
-	MOCK_CLEAR(spdk_bdev_writev_blocks);
-	_crypto_operation_complete(g_bdev_io, 0);
+	MOCK_CLEAR(spdk_bdev_writev_blocks_ext);
+	crypto_write(g_crypto_ch, g_bdev_io);
 	poll_threads();
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_completion_called == true);
@@ -500,19 +447,11 @@ test_crypto_op_complete(void)
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE;
 	g_completion_called = false;
-	MOCK_SET(spdk_bdev_writev_blocks, -EINVAL);
-	_crypto_operation_complete(g_bdev_io, 0);
+	MOCK_SET(spdk_bdev_writev_blocks_ext, -EINVAL);
+	crypto_write(g_crypto_ch, g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
 	CU_ASSERT(g_completion_called == true);
-	MOCK_CLEAR(spdk_bdev_writev_blocks);
-
-	/* Test bogus type for this completion. */
-	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
-	g_bdev_io->type = SPDK_BDEV_IO_TYPE_RESET;
-	g_completion_called = false;
-	_crypto_operation_complete(g_bdev_io, 0);
-	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
-	CU_ASSERT(g_completion_called == true);
+	MOCK_CLEAR(spdk_bdev_writev_blocks_ext);
 }
 
 static void

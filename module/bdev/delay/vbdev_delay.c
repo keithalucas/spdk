@@ -39,6 +39,7 @@ SPDK_BDEV_MODULE_REGISTER(delay, &delay_if)
 struct bdev_association {
 	char			*vbdev_name;
 	char			*bdev_name;
+	struct spdk_uuid	uuid;
 	uint64_t		avg_read_latency;
 	uint64_t		p99_read_latency;
 	uint64_t		avg_write_latency;
@@ -254,11 +255,22 @@ vbdev_delay_queue_io(struct spdk_bdev_io *bdev_io)
 }
 
 static void
+delay_init_ext_io_opts(struct spdk_bdev_io *bdev_io, struct spdk_bdev_ext_io_opts *opts)
+{
+	memset(opts, 0, sizeof(*opts));
+	opts->size = sizeof(*opts);
+	opts->memory_domain = bdev_io->u.bdev.memory_domain;
+	opts->memory_domain_ctx = bdev_io->u.bdev.memory_domain_ctx;
+	opts->metadata = bdev_io->u.bdev.md_buf;
+}
+
+static void
 delay_read_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io, bool success)
 {
 	struct vbdev_delay *delay_node = SPDK_CONTAINEROF(bdev_io->bdev, struct vbdev_delay,
 					 delay_bdev);
 	struct delay_io_channel *delay_ch = spdk_io_channel_get_ctx(ch);
+	struct spdk_bdev_ext_io_opts io_opts;
 	int rc;
 
 	if (!success) {
@@ -266,10 +278,11 @@ delay_read_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io, 
 		return;
 	}
 
+	delay_init_ext_io_opts(bdev_io, &io_opts);
 	rc = spdk_bdev_readv_blocks_ext(delay_node->base_desc, delay_ch->base_ch, bdev_io->u.bdev.iovs,
 					bdev_io->u.bdev.iovcnt, bdev_io->u.bdev.offset_blocks,
 					bdev_io->u.bdev.num_blocks, _delay_complete_io,
-					bdev_io, bdev_io->u.bdev.ext_opts);
+					bdev_io, &io_opts);
 
 	if (rc == -ENOMEM) {
 		SPDK_ERRLOG("No memory, start to queue io for delay.\n");
@@ -381,6 +394,7 @@ vbdev_delay_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev
 	struct vbdev_delay *delay_node = SPDK_CONTAINEROF(bdev_io->bdev, struct vbdev_delay, delay_bdev);
 	struct delay_io_channel *delay_ch = spdk_io_channel_get_ctx(ch);
 	struct delay_bdev_io *io_ctx = (struct delay_bdev_io *)bdev_io->driver_ctx;
+	struct spdk_bdev_ext_io_opts io_opts;
 	int rc = 0;
 	bool is_p99;
 
@@ -400,10 +414,11 @@ vbdev_delay_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
 		io_ctx->type = is_p99 ? DELAY_P99_WRITE : DELAY_AVG_WRITE;
+		delay_init_ext_io_opts(bdev_io, &io_opts);
 		rc = spdk_bdev_writev_blocks_ext(delay_node->base_desc, delay_ch->base_ch, bdev_io->u.bdev.iovs,
 						 bdev_io->u.bdev.iovcnt, bdev_io->u.bdev.offset_blocks,
 						 bdev_io->u.bdev.num_blocks, _delay_complete_io,
-						 bdev_io, bdev_io->u.bdev.ext_opts);
+						 bdev_io, &io_opts);
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
 		rc = spdk_bdev_write_zeroes_blocks(delay_node->base_desc, delay_ch->base_ch,
@@ -488,8 +503,15 @@ vbdev_delay_get_io_channel(void *ctx)
 static void
 _delay_write_conf_values(struct vbdev_delay *delay_node, struct spdk_json_write_ctx *w)
 {
+	struct spdk_uuid *uuid = &delay_node->delay_bdev.uuid;
+	char uuid_str[SPDK_UUID_STRING_LEN];
+
 	spdk_json_write_named_string(w, "name", spdk_bdev_get_name(&delay_node->delay_bdev));
 	spdk_json_write_named_string(w, "base_bdev_name", spdk_bdev_get_name(delay_node->base_bdev));
+	if (!spdk_mem_all_zero(uuid, sizeof(uuid))) {
+		spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), uuid);
+		spdk_json_write_named_string(w, "uuid", uuid_str);
+	}
 	spdk_json_write_named_int64(w, "avg_read_latency",
 				    delay_node->average_read_latency_ticks * SPDK_SEC_TO_USEC / spdk_get_ticks_hz());
 	spdk_json_write_named_int64(w, "p99_read_latency",
@@ -571,6 +593,7 @@ delay_bdev_ch_destroy_cb(void *io_device, void *ctx_buf)
  * on the global list. */
 static int
 vbdev_delay_insert_association(const char *bdev_name, const char *vbdev_name,
+			       struct spdk_uuid *uuid,
 			       uint64_t avg_read_latency, uint64_t p99_read_latency,
 			       uint64_t avg_write_latency, uint64_t p99_write_latency)
 {
@@ -608,6 +631,10 @@ vbdev_delay_insert_association(const char *bdev_name, const char *vbdev_name,
 	assoc->p99_read_latency = p99_read_latency;
 	assoc->avg_write_latency = avg_write_latency;
 	assoc->p99_write_latency = p99_write_latency;
+
+	if (uuid) {
+		spdk_uuid_copy(&assoc->uuid, uuid);
+	}
 
 	TAILQ_INSERT_TAIL(&g_bdev_associations, assoc, link);
 
@@ -764,6 +791,8 @@ vbdev_delay_register(const char *bdev_name)
 		}
 		delay_node->delay_bdev.product_name = "delay";
 
+		spdk_uuid_copy(&delay_node->delay_bdev.uuid, &assoc->uuid);
+
 		/* The base bdev that we're attaching to. */
 		rc = spdk_bdev_open_ext(bdev_name, true, vbdev_delay_base_bdev_event_cb,
 					NULL, &delay_node->base_desc);
@@ -829,7 +858,8 @@ error_close:
 }
 
 int
-create_delay_disk(const char *bdev_name, const char *vbdev_name, uint64_t avg_read_latency,
+create_delay_disk(const char *bdev_name, const char *vbdev_name, struct spdk_uuid *uuid,
+		  uint64_t avg_read_latency,
 		  uint64_t p99_read_latency, uint64_t avg_write_latency, uint64_t p99_write_latency)
 {
 	int rc = 0;
@@ -839,7 +869,7 @@ create_delay_disk(const char *bdev_name, const char *vbdev_name, uint64_t avg_re
 		return -EINVAL;
 	}
 
-	rc = vbdev_delay_insert_association(bdev_name, vbdev_name, avg_read_latency, p99_read_latency,
+	rc = vbdev_delay_insert_association(bdev_name, vbdev_name, uuid, avg_read_latency, p99_read_latency,
 					    avg_write_latency, p99_write_latency);
 	if (rc) {
 		return rc;

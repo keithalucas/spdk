@@ -25,7 +25,6 @@ nonarray_conf_file="$testdir/nonarray.json"
 
 function cleanup() {
 	rm -f "$SPDK_TEST_STORAGE/aiofile"
-	rm -f "$SPDK_TEST_STORAGE/spdk-pmem-pool"
 	rm -f "$conf_file"
 
 	if [[ $test_type == rbd ]]; then
@@ -190,8 +189,10 @@ function setup_crypto_sw_conf() {
 		bdev_malloc_create -b Malloc1 16 4096
 		accel_crypto_key_create -c AES_XTS -k 00112233445566778899001122334455 -e 11223344556677889900112233445500 -n test_dek_sw
 		accel_crypto_key_create -c AES_XTS -k 22334455667788990011223344550011 -e 33445566778899001122334455001122 -n test_dek_sw2
+		accel_crypto_key_create -c AES_XTS -k 33445566778899001122334455001122 -e 44556677889900112233445500112233 -n test_dek_sw3
 		bdev_crypto_create Malloc0 crypto_ram -n test_dek_sw
 		bdev_crypto_create Malloc1 crypto_ram2 -n test_dek_sw2
+		bdev_crypto_create crypto_ram2 crypto_ram3 -n test_dek_sw3
 		bdev_get_bdevs -b Malloc1
 	RPC
 }
@@ -253,16 +254,6 @@ function setup_crypto_mlx5_conf() {
 		bdev_crypto_create Malloc0 crypto_ram4 -k $block_key -c AES_XTS -k2 $tweak_key
 		bdev_get_bdevs -b Malloc0
 	RPC
-}
-
-function setup_pmem_conf() {
-	if hash pmempool; then
-		rm -f "$SPDK_TEST_STORAGE/spdk-pmem-pool"
-		pmempool create blk --size=32M 512 "$SPDK_TEST_STORAGE/spdk-pmem-pool"
-		"$rpc_py" bdev_pmem_create -n Pmem0 "$SPDK_TEST_STORAGE/spdk-pmem-pool"
-	else
-		return 1
-	fi
 }
 
 function setup_rbd_conf() {
@@ -677,9 +668,6 @@ case "$test_type" in
 		;;
 	crypto_accel_mlx5)
 		setup_crypto_accel_mlx5_conf
-		;;
-	pmem)
-		setup_pmem_conf
 		;;
 	rbd)
 		setup_rbd_conf

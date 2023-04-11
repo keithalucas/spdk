@@ -131,6 +131,7 @@ nvmf_tgt_destroy_poll_group(void *io_device, void *ctx_buf)
 
 	pthread_mutex_lock(&tgt->mutex);
 	TAILQ_REMOVE(&tgt->poll_groups, group, link);
+	tgt->num_poll_groups--;
 	pthread_mutex_unlock(&tgt->mutex);
 
 	assert(!(tgt->state == NVMF_TGT_PAUSING || tgt->state == NVMF_TGT_RESUMING));
@@ -173,6 +174,7 @@ nvmf_tgt_create_poll_group(void *io_device, void *ctx_buf)
 	uint32_t sid;
 	int rc;
 
+	group->tgt = tgt;
 	TAILQ_INIT(&group->tgroups);
 	TAILQ_INIT(&group->qpairs);
 	group->thread = thread;
@@ -212,6 +214,7 @@ nvmf_tgt_create_poll_group(void *io_device, void *ctx_buf)
 	}
 
 	pthread_mutex_lock(&tgt->mutex);
+	tgt->num_poll_groups++;
 	TAILQ_INSERT_TAIL(&tgt->poll_groups, group, link);
 	pthread_mutex_unlock(&tgt->mutex);
 
@@ -307,6 +310,7 @@ spdk_nvmf_tgt_create(struct spdk_nvmf_target_opts *opts)
 	tgt->discovery_genctr = 0;
 	TAILQ_INIT(&tgt->transports);
 	TAILQ_INIT(&tgt->poll_groups);
+	tgt->num_poll_groups = 0;
 
 	tgt->subsystems = calloc(tgt->max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
 	if (!tgt->subsystems) {
@@ -1169,13 +1173,28 @@ spdk_nvmf_poll_group_remove(struct spdk_nvmf_qpair *qpair)
 }
 
 static void
+_nvmf_qpair_sgroup_req_clean(struct spdk_nvmf_subsystem_poll_group *sgroup,
+			     const struct spdk_nvmf_qpair *qpair)
+{
+	struct spdk_nvmf_request *req, *tmp;
+	TAILQ_FOREACH_SAFE(req, &sgroup->queued, link, tmp) {
+		if (req->qpair == qpair) {
+			TAILQ_REMOVE(&sgroup->queued, req, link);
+			if (nvmf_transport_req_free(req)) {
+				SPDK_ERRLOG("Transport request free error!\n");
+			}
+		}
+	}
+}
+
+static void
 _nvmf_qpair_destroy(void *ctx, int status)
 {
 	struct nvmf_qpair_disconnect_ctx *qpair_ctx = ctx;
 	struct spdk_nvmf_qpair *qpair = qpair_ctx->qpair;
 	struct spdk_nvmf_ctrlr *ctrlr = qpair->ctrlr;
-	struct spdk_nvmf_request *req, *tmp;
 	struct spdk_nvmf_subsystem_poll_group *sgroup;
+	uint32_t sid;
 
 	assert(qpair->state == SPDK_NVMF_QPAIR_DEACTIVATING);
 	qpair_ctx->qid = qpair->qid;
@@ -1196,13 +1215,12 @@ _nvmf_qpair_destroy(void *ctx, int status)
 
 	if (ctrlr) {
 		sgroup = &qpair->group->sgroups[ctrlr->subsys->id];
-		TAILQ_FOREACH_SAFE(req, &sgroup->queued, link, tmp) {
-			if (req->qpair == qpair) {
-				TAILQ_REMOVE(&sgroup->queued, req, link);
-				if (nvmf_transport_req_free(req)) {
-					SPDK_ERRLOG("Transport request free error!\n");
-				}
-			}
+		_nvmf_qpair_sgroup_req_clean(sgroup, qpair);
+	} else {
+		for (sid = 0; sid < qpair->group->num_sgroups; sid++) {
+			sgroup = &qpair->group->sgroups[sid];
+			assert(sgroup != NULL);
+			_nvmf_qpair_sgroup_req_clean(sgroup, qpair);
 		}
 	}
 
