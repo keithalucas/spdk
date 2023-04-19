@@ -535,7 +535,7 @@ raid1_resize(struct raid_bdev *raid_bdev)
 
 static struct raid_bdev_module g_raid1_module = {
 	.level = RAID1,
-	.base_bdevs_min = 2,
+	.base_bdevs_min = 1,
 	.base_bdevs_constraint = {CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL, 1},
 	.memory_domains_supported = true,
 	.start = raid1_start,
