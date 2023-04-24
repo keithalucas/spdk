@@ -13,7 +13,7 @@
 #define RAID_BDEV_SB_VERSION_MAJOR	1
 #define RAID_BDEV_SB_VERSION_MINOR	0
 
-#define RAID_BDEV_SB_NAME_SIZE		32
+#define RAID_BDEV_SB_NAME_SIZE		64
 
 #define RAID_BDEV_SB_MAX_LENGTH \
 	SPDK_ALIGN_CEIL((sizeof(struct raid_bdev_superblock) + UINT8_MAX * sizeof(struct raid_bdev_sb_base_bdev)), 0x1000)
@@ -84,7 +84,7 @@ struct raid_bdev_superblock {
 	/* array of base bdev descriptors */
 	struct raid_bdev_sb_base_bdev base_bdevs[];
 };
-SPDK_STATIC_ASSERT(sizeof(struct raid_bdev_superblock) == 192, "incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct raid_bdev_superblock) == 224, "incorrect size");
 
 typedef void (*raid_bdev_load_sb_cb)(const struct raid_bdev_superblock *sb, int status, void *ctx);
 typedef void (*raid_bdev_save_sb_cb)(int status, void *ctx);
