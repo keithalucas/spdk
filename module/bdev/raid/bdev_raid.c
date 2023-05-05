@@ -87,6 +87,13 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 		return -ENOMEM;
 	}
 
+	raid_ch->base_bdev_modes = calloc(raid_bdev->num_base_bdevs,
+					  sizeof(*raid_ch->base_bdev_modes));
+	if (!raid_ch->base_bdev_modes) {
+		SPDK_ERRLOG("Unable to allocate base bdevs read write mode\n");
+		return -ENOMEM;
+	}
+
 	pthread_mutex_lock(&raid_bdev->mutex);
 	raid_ch->is_suspended = (raid_bdev->suspend_cnt > 0);
 
@@ -124,7 +131,9 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 			}
 		}
 		free(raid_ch->base_channel);
+		free(raid_ch->base_bdev_modes);
 		raid_ch->base_channel = NULL;
+		raid_ch->base_bdev_modes = NULL;
 	}
 	return ret;
 }
@@ -149,6 +158,7 @@ raid_bdev_destroy_cb(void *io_device, void *ctx_buf)
 
 	assert(raid_ch != NULL);
 	assert(raid_ch->base_channel);
+	assert(raid_ch->base_bdev_modes);
 	assert(TAILQ_EMPTY(&raid_ch->suspended_ios));
 
 	if (raid_ch->module_channel) {
@@ -162,7 +172,9 @@ raid_bdev_destroy_cb(void *io_device, void *ctx_buf)
 		}
 	}
 	free(raid_ch->base_channel);
+	free(raid_ch->base_bdev_modes);
 	raid_ch->base_channel = NULL;
+	raid_ch->base_bdev_modes = NULL;
 }
 
 /*
@@ -657,6 +669,7 @@ raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ct
 		spdk_json_write_named_bool(w, "is_configured", base_info->is_configured);
 		spdk_json_write_named_uint64(w, "data_offset", base_info->data_offset);
 		spdk_json_write_named_uint64(w, "data_size", base_info->data_size);
+		spdk_json_write_named_string(w, "mode", raid_bdev_mode_to_str(base_info->mode));
 		spdk_json_write_object_end(w);
 	}
 	spdk_json_write_array_end(w);
@@ -828,9 +841,20 @@ static struct {
 	{ }
 };
 
+static struct {
+	const char *name;
+	enum raid_base_bdev_mode value;
+} g_raid_mode_names[] = {
+	{ "rw", RAID_BASE_BDEV_MODE_RW },
+	{ "ro", RAID_BASE_BDEV_MODE_RO },
+	{ "wo", RAID_BASE_BDEV_MODE_WO },
+	{ }
+};
+
 /* We have to use the typedef in the function declaration to appease astyle. */
 typedef enum raid_level raid_level_t;
 typedef enum raid_bdev_state raid_bdev_state_t;
+typedef enum raid_base_bdev_mode raid_base_bdev_mode_t;
 
 raid_level_t
 raid_bdev_str_to_level(const char *str)
@@ -892,6 +916,37 @@ raid_bdev_state_to_str(enum raid_bdev_state state)
 	assert(false);
 	return "";
 }
+
+raid_base_bdev_mode_t
+raid_bdev_str_to_mode(const char *str)
+{
+	unsigned int i;
+
+	assert(str != NULL);
+
+	for (i = 0; g_raid_mode_names[i].name != NULL; i++) {
+		if (strcasecmp(g_raid_mode_names[i].name, str) == 0) {
+			return g_raid_mode_names[i].value;
+		}
+	}
+
+	return RAID_BASE_BDEV_MODE_INVALID;
+}
+
+const char *
+raid_bdev_mode_to_str(enum raid_base_bdev_mode mode)
+{
+	unsigned int i;
+
+	for (i = 0; g_raid_mode_names[i].name != NULL; i++) {
+		if (g_raid_mode_names[i].value == mode) {
+			return g_raid_mode_names[i].name;
+		}
+	}
+
+	return "";
+}
+
 
 /*
  * brief:
@@ -1787,6 +1842,124 @@ raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 	}
 
 	return 0;
+}
+
+struct raid_bdev_set_base_bdev_mode_ctx {
+	struct raid_base_bdev_info *base_info;
+	raid_bdev_destruct_cb cb_fn;
+	void *cb_arg;
+};
+
+static void
+raid_bdev_channel_set_base_bdev_mode(struct spdk_io_channel_iter *i)
+{
+	struct raid_bdev_set_base_bdev_mode_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+	uint8_t idx = base_info - base_info->raid_bdev->base_bdev_info;
+
+	SPDK_DEBUGLOG(bdev_raid, "slot: %u raid_ch: %p\n", idx, raid_ch);
+
+	if (raid_ch->base_channel[idx] != NULL) {
+		raid_ch->base_bdev_modes[idx] = base_info->mode;
+	}
+
+	spdk_for_each_channel_continue(i, 0);
+}
+
+static void
+raid_bdev_set_base_bdev_mode_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev_set_base_bdev_mode_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	raid_bdev_resume(raid_bdev, ctx->cb_fn, ctx->cb_arg);
+	free(ctx);
+}
+
+static void
+raid_bdev_set_base_bdev_mode_on_suspended(struct raid_bdev *raid_bdev, void *ctx)
+{
+	spdk_for_each_channel(raid_bdev, raid_bdev_channel_set_base_bdev_mode, ctx,
+			      raid_bdev_set_base_bdev_mode_done);
+}
+
+/*
+ * brief:
+ * raid_bdev_set_base_bdev_mode function sets the read and write mode of a base bdev
+ * params:
+ * base_bdev - pointer to base bdev which has to be updated with mode
+ * mode - read and write mode to set
+ * returns:
+ * 0 - success
+ * non zero - failure
+ */
+int
+raid_bdev_set_base_bdev_mode(struct spdk_bdev *base_bdev, enum raid_base_bdev_mode mode,
+			     raid_bdev_destruct_cb cb_fn, void *cb_arg)
+{
+	struct raid_bdev *raid_bdev;
+	struct raid_base_bdev_info *base_info;
+	struct raid_bdev_set_base_bdev_mode_ctx *ctx;
+	uint8_t rw_operational = 0;
+	int i;
+
+	SPDK_DEBUGLOG(bdev_raid, "%s\n", base_bdev->name);
+
+	/* Find the raid_bdev which has claimed this base_bdev */
+	base_info = raid_bdev_find_base_info_by_bdev(base_bdev);
+	if (!base_info) {
+		SPDK_ERRLOG("bdev '%s' to set mode not found\n", base_bdev->name);
+		return -ENODEV;
+	}
+	raid_bdev = base_info->raid_bdev;
+
+	/* Check if raid bdev supports this operation */
+	for (i = 0; i < RAID_BASE_BDEV_MODE_MAX; i++) {
+		if (raid_bdev->module->rw_mode_supported[i] == mode) {
+			break;
+		}
+	}
+	if (i == RAID_BASE_BDEV_MODE_MAX) {
+		return -EPERM;
+	}
+
+	if (mode != RAID_BASE_BDEV_MODE_RW) {
+		/* Check if min base bdev operational remain in rw mode */
+
+		for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
+			if (&raid_bdev->base_bdev_info[i] != base_info &&
+			    raid_bdev->base_bdev_info[i].mode == RAID_BASE_BDEV_MODE_RW) {
+				rw_operational++;
+			}
+		}
+
+		if (rw_operational < raid_bdev->min_base_bdevs_operational) {
+			return -EPERM;
+		}
+	}
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	if (base_info->remove_scheduled) {
+		return -EBUSY;
+	}
+
+	assert(base_info->desc);
+	base_info->mode = mode;
+
+	ctx = malloc(sizeof(*ctx));
+	if (ctx == NULL) {
+		return -ENOMEM;
+	}
+
+	ctx->base_info = base_info;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	return raid_bdev_suspend(raid_bdev, raid_bdev_set_base_bdev_mode_on_suspended, ctx);
 }
 
 /*

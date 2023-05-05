@@ -179,6 +179,8 @@ run_for_each_raid1_config(void (*test_fn)(struct raid_bdev *raid_bdev,
 			raid_ch.base_channel[i] = calloc(1, sizeof(*raid_ch.base_channel));
 		}
 
+		raid_ch.base_bdev_modes = calloc(params->num_base_bdevs, sizeof(enum raid_base_bdev_mode));
+
 		raid_ch.module_channel = raid1_get_io_channel(r1info->raid_bdev);
 		SPDK_CU_ASSERT_FATAL(raid_ch.module_channel);
 
@@ -187,6 +189,7 @@ run_for_each_raid1_config(void (*test_fn)(struct raid_bdev *raid_bdev,
 		spdk_put_io_channel(raid_ch.module_channel);
 		poll_threads();
 
+		free(raid_ch.base_bdev_modes);
 		for (i = 0; i < raid_ch.num_channels; i++) {
 			free(raid_ch.base_channel[i]);
 		}
@@ -272,6 +275,31 @@ test_raid1_read_balancing_limit_reset(void)
 	run_for_each_raid1_config(__test_raid1_read_balancing_limit_reset);
 }
 
+static void
+__test_raid1_write_only(struct raid_bdev *raid_bdev, struct raid_bdev_io_channel *raid_ch)
+{
+	struct raid1_info *r1info = raid_bdev->module_private;
+	struct raid_bdev_io *raid_io;
+	struct raid1_io_channel *raid1_ch = spdk_io_channel_get_ctx(raid_ch->module_channel);
+	uint64_t io_blocks = 256;
+
+	if (raid_ch->num_channels > 0) {
+		raid_ch->base_bdev_modes[0] = RAID_BASE_BDEV_MODE_WO;
+
+		raid_io = get_raid_io(r1info, raid_ch, SPDK_BDEV_IO_TYPE_READ, io_blocks);
+		raid1_submit_rw_request(raid_io);
+		raid_bdev_io_complete(raid_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+
+		CU_ASSERT(raid1_ch->base_bdev_read_bw[0] == 0);
+	}
+}
+
+static void
+test_raid1_write_only(void)
+{
+	run_for_each_raid1_config(__test_raid1_write_only);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -285,6 +313,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_raid1_start);
 	CU_ADD_TEST(suite, test_raid1_read_balancing);
 	CU_ADD_TEST(suite, test_raid1_read_balancing_limit_reset);
+	CU_ADD_TEST(suite, test_raid1_write_only);
 
 	allocate_threads(1);
 	set_thread(0);

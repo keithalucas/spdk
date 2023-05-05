@@ -457,6 +457,20 @@ def bdev_raid_remove_base_bdev(client, name):
     return client.call('bdev_raid_remove_base_bdev', params)
 
 
+def bdev_raid_set_base_bdev_mode(client, name, mode):
+    """Set the read and write mode of a base bdev
+
+    Args:
+        name: base bdev name
+        mode: read/write mode
+
+    Returns:
+        None
+    """
+    params = {'name': name, 'mode': mode}
+    return client.call('bdev_raid_set_base_bdev_mode', params)
+
+
 def bdev_aio_create(client, filename, name, block_size=None, readonly=False):
     """Construct a Linux AIO block device.
 

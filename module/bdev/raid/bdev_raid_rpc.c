@@ -442,3 +442,156 @@ cleanup:
 	free(name);
 }
 SPDK_RPC_REGISTER("bdev_raid_remove_base_bdev", rpc_bdev_raid_remove_base_bdev, SPDK_RPC_RUNTIME)
+
+/*
+ * Input structure for RPC rpc_bdev_raid_set_base_bdev_mode
+ */
+struct rpc_bdev_raid_set_base_bdev_mode {
+	/* Base bdev name */
+	char						*name;
+
+	/* Base bdev read/write mode */
+	enum raid_base_bdev_mode	mode;
+};
+
+/*
+ * brief:
+ * free_rpc_bdev_raid_set_base_bdev_mode function is used to free RPC bdev_raid_set_base_bdev_mode
+ * related parameters
+ * params:
+ * req - pointer to RPC request
+ * returns:
+ * none
+ */
+static void
+free_rpc_bdev_raid_set_base_bdev_mode(struct rpc_bdev_raid_set_base_bdev_mode *req)
+{
+	free(req->name);
+}
+
+/*
+ * Decoder function for RPC bdev_raid_set_base_bdev_mode to decode raid mode
+ */
+static int
+decode_raid_mode(const struct spdk_json_val *val, void *out)
+{
+	int ret;
+	char *str = NULL;
+	enum raid_base_bdev_mode mode;
+
+	ret = spdk_json_decode_string(val, &str);
+	if (ret == 0 && str != NULL) {
+		mode = raid_bdev_str_to_mode(str);
+		if (mode == RAID_BASE_BDEV_MODE_INVALID) {
+			ret = -EINVAL;
+		} else {
+			*(enum raid_base_bdev_mode *)out = mode;
+		}
+	}
+
+	free(str);
+	return ret;
+}
+
+/*
+ * Decoder object for RPC bdev_raid_set_base_bdev_mode
+ */
+static const struct spdk_json_object_decoder rpc_bdev_raid_set_base_bdev_mode_decoders[] = {
+	{"name", offsetof(struct rpc_bdev_raid_create, name), spdk_json_decode_string},
+	{"mode", offsetof(struct rpc_bdev_raid_set_base_bdev_mode, mode), decode_raid_mode},
+};
+
+struct rpc_bdev_raid_set_base_bdev_mode_ctx {
+	struct rpc_bdev_raid_set_base_bdev_mode req;
+	struct spdk_jsonrpc_request *request;
+};
+
+/*
+ * brief:
+ * bdev_raid_set_base_bdev_mode_done is the function to call at the end of the process for
+ * setting the mode of a base bdev
+ * params:
+ * cb_arg - pointer to the callback context.
+ * rc - return code of the mode setting of the base bdev.
+ * returns:
+ * none
+ */
+static void
+bdev_raid_set_base_bdev_mode_done(void *cb_arg, int rc)
+{
+	struct rpc_bdev_raid_set_base_bdev_mode_ctx *ctx = cb_arg;
+	struct spdk_jsonrpc_request *request = ctx->request;
+
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to set mode of base bdev %s (%d): %s\n",
+			    ctx->req.name, rc, spdk_strerror(-rc));
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 spdk_strerror(-rc));
+		goto exit;
+	}
+
+	spdk_jsonrpc_send_bool_response(request, true);
+exit:
+	free_rpc_bdev_raid_set_base_bdev_mode(&ctx->req);
+	free(ctx);
+}
+
+/*
+ * brief:
+ * rpc_bdev_raid_set_base_bdev_mode function is the RPC for setting the read and write mode
+ * of a base bdev
+ * It takes base bdev name and base bdev mode as input. Base bdev mode can be: rw, ro, wo.
+ * params:
+ * request - pointer to json rpc request
+ * params - pointer to request parameters
+ * returns:
+ * none
+ */
+static void
+rpc_bdev_raid_set_base_bdev_mode(struct spdk_jsonrpc_request *request,
+				 const struct spdk_json_val *params)
+{
+
+	struct rpc_bdev_raid_set_base_bdev_mode_ctx	*ctx;
+	struct spdk_bdev *bdev;
+	int rc;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
+		return;
+	}
+
+	if (spdk_json_decode_object(params, rpc_bdev_raid_set_base_bdev_mode_decoders,
+				    SPDK_COUNTOF(rpc_bdev_raid_set_base_bdev_mode_decoders),
+				    &ctx->req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_PARSE_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(ctx->req.name);
+	if (bdev == NULL) {
+		spdk_jsonrpc_send_error_response_fmt(request, -ENODEV, "base bdev %s is not found in config",
+						     ctx->req.name);
+		goto cleanup;
+	}
+
+	ctx->request = request;
+
+	rc = raid_bdev_set_base_bdev_mode(bdev, ctx->req.mode, bdev_raid_set_base_bdev_mode_done, ctx);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response_fmt(request, rc,
+						     "Failed to set mode %s in RAID bdev %s: %s",
+						     raid_bdev_mode_to_str(ctx->req.mode), ctx->req.name, spdk_strerror(-rc));
+		goto cleanup;
+	}
+
+	return;
+
+cleanup:
+	free_rpc_bdev_raid_set_base_bdev_mode(&ctx->req);
+	free(ctx);
+}
+SPDK_RPC_REGISTER("bdev_raid_set_base_bdev_mode", rpc_bdev_raid_set_base_bdev_mode,
+		  SPDK_RPC_RUNTIME)

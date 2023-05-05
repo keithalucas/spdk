@@ -68,7 +68,7 @@ raid1_channel_next_read_base_bdev(struct raid_bdev_io_channel *raid_ch)
 			idx = 0;
 		}
 
-		if (raid_ch->base_channel[idx]) {
+		if (raid_ch->base_channel[idx] && raid_ch->base_bdev_modes[idx] != RAID_BASE_BDEV_MODE_WO) {
 			raid1_ch->base_bdev_read_idx = idx;
 
 			if (raid1_ch->base_bdev_read_bw[idx] < raid1_ch->base_bdev_max_read_bw) {
@@ -324,6 +324,7 @@ static struct raid_bdev_module g_raid1_module = {
 	.stop = raid1_stop,
 	.submit_rw_request = raid1_submit_rw_request,
 	.get_io_channel = raid1_get_io_channel,
+	.rw_mode_supported = {RAID_BASE_BDEV_MODE_RW, RAID_BASE_BDEV_MODE_WO},
 };
 RAID_MODULE_REGISTER(&g_raid1_module)
 

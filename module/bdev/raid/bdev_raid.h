@@ -49,6 +49,25 @@ enum raid_bdev_state {
 };
 
 /*
+ * Raid mode describes the read and write permissions of raid's base bdevs
+ */
+enum raid_base_bdev_mode {
+	RAID_BASE_BDEV_MODE_INVALID	= -1,
+
+	/* read and write enabled */
+	RAID_BASE_BDEV_MODE_RW = 0,
+
+	/* reand only mode */
+	RAID_BASE_BDEV_MODE_RO,
+
+	/* write only mode */
+	RAID_BASE_BDEV_MODE_WO,
+
+	/* mode max, new modes should be added before this */
+	RAID_BASE_BDEV_MODE_MAX
+};
+
+/*
  * raid_base_bdev_info contains information for the base bdevs which are part of some
  * raid. This structure contains the per base bdev information. Whatever is
  * required per base device for raid bdev will be kept here
@@ -90,6 +109,9 @@ struct raid_base_bdev_info {
 
 	/* Set to true when base bdev has completed the configuration process */
 	bool			is_configured;
+
+	/* Read and write permissions */
+	enum raid_base_bdev_mode mode;
 };
 
 /*
@@ -201,6 +223,9 @@ struct raid_bdev_io_channel {
 	/* Array of IO channels of base bdevs */
 	struct spdk_io_channel	**base_channel;
 
+	/* Array of read and write modes of base_bdevs */
+	enum raid_base_bdev_mode *base_bdev_modes;
+
 	/* Number of IO channels */
 	uint8_t			num_channels;
 
@@ -234,8 +259,12 @@ enum raid_level raid_bdev_str_to_level(const char *str);
 const char *raid_bdev_level_to_str(enum raid_level level);
 enum raid_bdev_state raid_bdev_str_to_state(const char *str);
 const char *raid_bdev_state_to_str(enum raid_bdev_state state);
+enum raid_base_bdev_mode raid_bdev_str_to_mode(const char *str);
+const char *raid_bdev_mode_to_str(enum raid_base_bdev_mode mode);
 void raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ctx *w);
 int raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev);
+int raid_bdev_set_base_bdev_mode(struct spdk_bdev *base_bdev, enum raid_base_bdev_mode mode,
+				 raid_bdev_destruct_cb cb_fn, void *cb_arg);
 
 /*
  * RAID module descriptor
@@ -301,6 +330,9 @@ struct raid_bdev_module {
 	void (*resize)(struct raid_bdev *raid_bdev);
 
 	TAILQ_ENTRY(raid_bdev_module) link;
+
+	/* Tell if read and write mode setting for base bdevs is supported */
+	enum raid_base_bdev_mode rw_mode_supported[RAID_BASE_BDEV_MODE_MAX];
 };
 
 void raid_bdev_module_list_add(struct raid_bdev_module *raid_module);

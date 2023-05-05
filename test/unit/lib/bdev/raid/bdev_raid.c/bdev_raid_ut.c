@@ -2298,6 +2298,74 @@ test_raid_suspend_resume_create_ch(void)
 	set_thread(0);
 }
 
+static void
+set_mode_cb(void *cb_arg, int rc)
+{
+	*(int *)cb_arg = rc;
+}
+
+static void
+test_raid_set_mode(void)
+{
+	struct rpc_bdev_raid_create req;
+	struct rpc_bdev_raid_delete destroy_req;
+	struct raid_bdev *pbdev;
+	struct spdk_bdev *fake_base_bdev;
+	struct spdk_io_channel *ch;
+	int set_mode_cb_output;
+	int rc;
+
+	set_globals();
+	CU_ASSERT(raid_bdev_init() == 0);
+
+	verify_raid_bdev_present("raid1", false);
+	create_raid_bdev_create_req(&req, "raid1", 0, true, 0, false);
+	rpc_bdev_raid_create(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev(&req, true, RAID_BDEV_STATE_ONLINE);
+
+	TAILQ_FOREACH(pbdev, &g_raid_bdev_list, global_link) {
+		if (strcmp(pbdev->bdev.name, "raid1") == 0) {
+			break;
+		}
+	}
+	CU_ASSERT(pbdev != NULL);
+
+	/* set rw mode on a not valid bdev */
+	fake_base_bdev = calloc(1, sizeof(struct spdk_bdev));
+	rc = raid_bdev_set_base_bdev_mode(fake_base_bdev, RAID_BASE_BDEV_MODE_RW, set_mode_cb,
+					  &set_mode_cb_output);
+	SPDK_CU_ASSERT_FATAL(rc == -ENODEV);
+	free(fake_base_bdev);
+
+	/* set ro mode on valid bdev that doesn't support it */
+	rc = raid_bdev_set_base_bdev_mode(pbdev->base_bdev_info[0].bdev, RAID_BASE_BDEV_MODE_RO,
+					  set_mode_cb, &set_mode_cb_output);
+	SPDK_CU_ASSERT_FATAL(rc == -EPERM);
+
+	/* set rw mode on valid bdev */
+	ch = spdk_get_io_channel(pbdev);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+	set_mode_cb_output = 1;
+	rc = raid_bdev_set_base_bdev_mode(pbdev->base_bdev_info[0].bdev, RAID_BASE_BDEV_MODE_RW,
+					  set_mode_cb, &set_mode_cb_output);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	poll_threads();
+	CU_ASSERT(set_mode_cb_output == 0);
+	spdk_put_io_channel(ch);
+
+	free_test_req(&req);
+
+	create_raid_bdev_delete_req(&destroy_req, "raid1", 0);
+	rpc_bdev_raid_delete(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev_present("raid1", false);
+
+	raid_bdev_exit();
+	base_bdevs_cleanup();
+	reset_globals();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2328,6 +2396,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_raid_level_conversions);
 	CU_ADD_TEST(suite, test_raid_suspend_resume);
 	CU_ADD_TEST(suite, test_raid_suspend_resume_create_ch);
+	CU_ADD_TEST(suite, test_raid_set_mode);
 
 	allocate_threads(1);
 	set_thread(0);

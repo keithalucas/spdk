@@ -10295,6 +10295,46 @@ Example response:
 }
 ~~~
 
+### bdev_raid_set_base_bdev_mode {#rpc_bdev_raid_set_base_bdev_mode}
+
+Set the read and write mode of a base bdev. Mode should be one
+of 'rw', 'ro' or 'wo'. 'rw' means read and write enabled, 'ro' read
+only and 'wo' write only.
+All raid levels support 'rw', which is the default. Raid1 supports also 'wo'.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | Base bdev name in RAID
+mode                    | Required | string      | read/write mode
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_raid_set_base_bdev_mode",
+  "id": 1,
+  "params": {
+    "name": "Raid1",
+    "mode": "wo",
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
 ## SPLIT
 
 ### bdev_split_create {#rpc_bdev_split_create}
