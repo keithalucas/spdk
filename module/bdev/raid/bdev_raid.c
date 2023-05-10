@@ -2161,7 +2161,7 @@ raid_bdev_create_from_sb(const struct raid_bdev_superblock *sb)
 	int rc;
 
 	rc = _raid_bdev_create(sb->name, (sb->strip_size * sb->block_size) / 1024, sb->num_base_bdevs,
-			       sb->level, true, &raid_bdev);
+			       sb->level, &raid_bdev, &sb->uuid, true);
 	if (rc != 0) {
 		return rc;
 	}
