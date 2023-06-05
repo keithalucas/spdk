@@ -1272,12 +1272,13 @@ raid_bdev_configure_md(struct raid_bdev *raid_bdev)
 	return 0;
 }
 
-typedef void (*raid_bdev_write_superblock_cb)(bool success, struct raid_bdev *raid_bdev);
+typedef void (*raid_bdev_write_superblock_cb)(bool success, struct raid_bdev *raid_bdev, void *ctx);
 
 struct raid_bdev_write_superblock_ctx {
 	bool success;
 	uint8_t remaining;
-	raid_bdev_write_superblock_cb cb;
+	raid_bdev_write_superblock_cb cb_fn;
+	void *cb_arg;
 };
 
 static void
@@ -1293,15 +1294,16 @@ raid_bdev_write_superblock_base_bdev_cb(int status, void *_ctx)
 	}
 
 	if (--ctx->remaining == 0) {
-		if (ctx->cb) {
-			ctx->cb(ctx->success, base_info->raid_bdev);
+		if (ctx->cb_fn) {
+			ctx->cb_fn(ctx->success, base_info->raid_bdev, ctx->cb_arg);
 		}
 		free(ctx);
 	}
 }
 
 static int
-raid_bdev_write_superblock(struct raid_bdev *raid_bdev, raid_bdev_write_superblock_cb cb)
+raid_bdev_write_superblock(struct raid_bdev *raid_bdev, raid_bdev_write_superblock_cb cb_fn,
+			   void *cb_arg)
 {
 	struct raid_base_bdev_info *base_info;
 	struct raid_bdev_write_superblock_ctx *ctx;
@@ -1317,7 +1319,8 @@ raid_bdev_write_superblock(struct raid_bdev *raid_bdev, raid_bdev_write_superblo
 
 	ctx->success = true;
 	ctx->remaining = raid_bdev->num_base_bdevs;
-	ctx->cb = cb;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
 
 	raid_bdev->sb_write_ctx = ctx;
 
@@ -1402,7 +1405,7 @@ raid_bdev_configure_cont(struct raid_bdev *raid_bdev)
 }
 
 static void
-raid_bdev_configure_write_sb_cb(bool success, struct raid_bdev *raid_bdev)
+raid_bdev_configure_write_sb_cb(bool success, struct raid_bdev *raid_bdev, void *ctx)
 {
 	if (success) {
 		raid_bdev_configure_cont(raid_bdev);
@@ -1488,7 +1491,7 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 			}
 		}
 
-		return raid_bdev_write_superblock(raid_bdev, raid_bdev_configure_write_sb_cb);
+		return raid_bdev_write_superblock(raid_bdev, raid_bdev_configure_write_sb_cb, NULL);
 	}
 
 	raid_bdev_configure_cont(raid_bdev);
@@ -1747,7 +1750,7 @@ raid_bdev_channel_remove_base_bdev(struct spdk_io_channel_iter *i)
 }
 
 static void
-raid_bdev_remove_base_bdev_write_sb_cb(bool success, struct raid_bdev *raid_bdev)
+raid_bdev_remove_base_bdev_write_sb_cb(bool success, struct raid_bdev *raid_bdev, void *ctx)
 {
 	if (!success) {
 		SPDK_ERRLOG("Failed to write raid bdev '%s' superblock\n", raid_bdev->bdev.name);
@@ -1783,9 +1786,9 @@ raid_bdev_remove_base_bdev_done(struct spdk_io_channel_iter *i, int status)
 		/* TODO: distinguish between failure and intentional removal */
 		sb_base_bdev->state = RAID_SB_BASE_BDEV_FAILED;
 
-		rc = raid_bdev_write_superblock(raid_bdev, raid_bdev_remove_base_bdev_write_sb_cb);
+		rc = raid_bdev_write_superblock(raid_bdev, raid_bdev_remove_base_bdev_write_sb_cb, NULL);
 		if (rc != 0) {
-			raid_bdev_remove_base_bdev_write_sb_cb(false, raid_bdev);
+			raid_bdev_remove_base_bdev_write_sb_cb(false, raid_bdev, NULL);
 		}
 	} else {
 		raid_bdev_resume(raid_bdev, NULL, NULL);
