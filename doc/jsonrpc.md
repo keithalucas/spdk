@@ -495,6 +495,7 @@ Example response:
     "bdev_lvol_delete_lvstore",
     "bdev_lvol_rename_lvstore",
     "bdev_lvol_create_lvstore",
+    "bdev_lvol_shallow_copy",
     "bdev_daos_delete",
     "bdev_daos_create",
     "bdev_daos_resize"
@@ -9996,6 +9997,90 @@ Example response:
     }
   }
 ]
+~~~
+
+### bdev_lvol_shallow_copy {#rpc_bdev_lvol_shallow_copy}
+
+Make a shallow copy of lvol over a given bdev. Only cluster allocated to the lvol will be written on the bdev.
+Must have:
+* lvol read only
+* lvol size smaller than bdev size
+* lvstore block size a multiple of bdev size
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+src_lvol_name           | Required | string      | UUID or alias of lvol to create a copy from
+dst_bdev_name           | Required | string      | Name of the bdev that acts as destination for the copy
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_shallow_copy",
+  "id": 1,
+  "params": {
+    "src_lvol_name": "8a47421a-20cf-444f-845c-d97ad0b0bd8e",
+    "dst_bdev_name": "Nvme1n1"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### bdev_lvol_shallow_copy_status {#rpc_bdev_lvol_shallow_copy_status}
+
+Get shallow copy status
+
+#### Result
+
+This RPC reports if a shallow copy is still in progress and operation's advance state in the format
+_number_of_copied_clusters/total_clusters_to_copy_
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+src_lvol_name           | Required | string      | UUID or alias of source lvol
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_shallow_copy_status",
+  "id": 1,
+  "params": {
+    "src_lvol_name": "8a47421a-20cf-444f-845c-d97ad0b0bd8e"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "in_progress": true,
+    "status": "2/4"
+  }
+}
 ~~~
 
 ## RAID

@@ -381,6 +381,20 @@ void spdk_lvol_decouple_parent(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_
  */
 bool spdk_lvol_is_degraded(const struct spdk_lvol *lvol);
 
+/**
+ * Make a shallow copy of lvol on given bs_dev.
+ *
+ * lvol must be read only and lvol size must be smaller than bs_dev size.
+ *
+ * \param lvol Handle to lvol
+ * \param ext_dev The bs_dev to copy on. This is created on the given bdev by using
+ * spdk_bdev_create_bs_dev_ext() beforehand
+ * \param cb_fn Completion callback
+ * \param cb_arg Completion callback custom arguments
+ */
+void spdk_lvol_shallow_copy(struct spdk_lvol *lvol, struct spdk_bs_dev *ext_dev,
+			    spdk_lvol_op_complete cb_fn, void *cb_arg);
+
 #ifdef __cplusplus
 }
 #endif

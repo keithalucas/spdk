@@ -2041,6 +2041,24 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('name', help='lvol bdev name')
     p.set_defaults(func=bdev_lvol_delete)
 
+    def bdev_lvol_shallow_copy(args):
+        rpc.lvol.bdev_lvol_shallow_copy(args.client,
+                                        src_lvol_name=args.src_lvol_name,
+                                        dst_bdev_name=args.dst_bdev_name)
+
+    p = subparsers.add_parser('bdev_lvol_shallow_copy', help="""Make a shallow copy of lvol over a given bdev.
+                                                             lvol must be read only""")
+    p.add_argument('src_lvol_name', help='source lvol name')
+    p.add_argument('dst_bdev_name', help='destination bdev name')
+    p.set_defaults(func=bdev_lvol_shallow_copy)
+
+    def bdev_lvol_shallow_copy_status(args):
+        print_json(rpc.lvol.bdev_lvol_shallow_copy_status(args.client,
+                                                          src_lvol_name=args.src_lvol_name))
+    p = subparsers.add_parser('bdev_lvol_shallow_copy_status', help='Get shallow copy status')
+    p.add_argument('src_lvol_name', help='source lvol name')
+    p.set_defaults(func=bdev_lvol_shallow_copy_status)
+
     def bdev_lvol_delete_lvstore(args):
         rpc.lvol.bdev_lvol_delete_lvstore(args.client,
                                           uuid=args.uuid,

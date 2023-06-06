@@ -515,6 +515,30 @@ uint64_t spdk_blob_get_next_allocated_io_unit(struct spdk_blob *blob, uint64_t o
  */
 uint64_t spdk_blob_get_next_unallocated_io_unit(struct spdk_blob *blob, uint64_t offset);
 
+/**
+ * Get the number of copied clusters of a shallow copy operation
+
+ * If a shallow copy of the blob is in progress, this functions returns the number of already
+ * copied clusters.
+ *
+ * \param blob Blob struct to query.
+ *
+ * \return cluster index or UINT64_MAX if no shallow copy is in progress
+ */
+uint64_t spdk_blob_get_shallow_copy_copied_clusters(struct spdk_blob *blob);
+
+/**
+ * Get the total number of clusters to be copied in a shallow copy operation
+
+ * If a shallow copy of the blob is in progress, this functions returns the total number
+ * of cluster involved in the operation.
+ *
+ * \param blob Blob struct to query.
+ *
+ * \return total number, 0 if no shallow copy is in progress
+ */
+uint64_t spdk_blob_get_shallow_copy_total_clusters(struct spdk_blob *blob);
+
 struct spdk_blob_xattr_opts {
 	/* Number of attributes */
 	size_t	count;
@@ -760,6 +784,26 @@ void spdk_bs_inflate_blob(struct spdk_blob_store *bs, struct spdk_io_channel *ch
  */
 void spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
 				  spdk_blob_id blobid, spdk_blob_op_complete cb_fn, void *cb_arg);
+
+/**
+ * Perform a shallow copy over a device
+ *
+ * This call make a shallow copy of a blob over an external blobstore block device.
+ * Only cluster allocated to the blob will be written on the device.
+ * Blob size must be smaller than device size.
+ * Blobstore block size must be a multiple of device block size.
+
+ * \param bs Blobstore
+ * \param channel IO channel used to copy the blob.
+ * \param blobid The id of the blob.
+ * \param ext_dev The device to copy on
+ * \param cb_fn Called when the operation is complete.
+ * \param cb_arg Argument passed to function cb_fn.
+ */
+void spdk_bs_blob_shallow_copy(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
+			       spdk_blob_id blobid, struct spdk_bs_dev *ext_dev,
+			       spdk_blob_op_complete cb_fn, void *cb_arg);
+
 
 struct spdk_blob_open_opts {
 	enum blob_clear_method  clear_method;
