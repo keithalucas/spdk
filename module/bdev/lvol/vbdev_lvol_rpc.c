@@ -1435,7 +1435,8 @@ rpc_bdev_lvol_shallow_copy_status(struct spdk_jsonrpc_request *request,
 	struct spdk_bdev *src_lvol_bdev;
 	struct spdk_lvol *src_lvol;
 	struct spdk_json_write_ctx *w;
-	uint64_t cluster_index, total_clusters;
+	uint64_t copied_clusters, total_clusters;
+	int result;
 
 	SPDK_INFOLOG(lvol_rpc, "Shallow copy status\n");
 
@@ -1462,16 +1463,26 @@ rpc_bdev_lvol_shallow_copy_status(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	cluster_index = spdk_blob_get_shallow_copy_copied_clusters(src_lvol->blob);
+	copied_clusters = spdk_blob_get_shallow_copy_copied_clusters(src_lvol->blob);
 	total_clusters = spdk_blob_get_shallow_copy_total_clusters(src_lvol->blob);
+	result = spdk_blob_get_shallow_copy_result(src_lvol->blob);
 
 	w = spdk_jsonrpc_begin_result(request);
 
 	spdk_json_write_object_begin(w);
-	spdk_json_write_named_bool(w, "in_progress", total_clusters > 0);
-	if (total_clusters > 0) {
-		spdk_json_write_named_string_fmt(w, "status", "%lu/%lu", cluster_index, total_clusters);
+
+	spdk_json_write_named_string_fmt(w, "progress", "%lu/%lu", copied_clusters, total_clusters);
+	if (result > 0) {
+		spdk_json_write_named_string(w, "state", "none");
+	} else if (copied_clusters < total_clusters && result == 0) {
+		spdk_json_write_named_string(w, "state", "in progress");
+	} else if (copied_clusters == total_clusters && result == 0) {
+		spdk_json_write_named_string(w, "state", "complete");
+	} else {
+		spdk_json_write_named_string(w, "state", "error");
+		spdk_json_write_named_string(w, "error", spdk_strerror(-result));
 	}
+
 	spdk_json_write_object_end(w);
 
 	spdk_jsonrpc_end_result(request, w);

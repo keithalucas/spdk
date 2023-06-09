@@ -153,6 +153,7 @@ struct spdk_blob {
 		struct {
 			uint64_t num_clusters_to_copy;
 			uint64_t copied_clusters_number;
+			int bserrno;
 		} shallow_copy;
 	} u;
 };

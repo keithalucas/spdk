@@ -10409,6 +10409,7 @@ Example response:
 
 Make a shallow copy of lvol over a given bdev. Only cluster allocated to the lvol will be written on the bdev.
 Must have:
+
 * lvol read only
 * lvol size smaller than bdev size
 * lvstore block size a multiple of bdev size
@@ -10452,8 +10453,8 @@ Get shallow copy status
 
 #### Result
 
-This RPC reports if a shallow copy is still in progress and operation's advance state in the format
-_number_of_copied_clusters/total_clusters_to_copy_
+This RPC reports the state of a shallow copy operation, in case of error a description, and
+operation's advance state in the format _number_of_copied_clusters/total_clusters_to_copy_.
 
 #### Parameters
 
@@ -10483,8 +10484,8 @@ Example response:
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "in_progress": true,
-    "status": "2/4"
+    "state": "in progress",
+    "progress": "2/4"
   }
 }
 ~~~
