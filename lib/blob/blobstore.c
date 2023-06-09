@@ -304,8 +304,7 @@ blob_alloc(struct spdk_blob_store *bs, spdk_blob_id id)
 	blob->parent_id = SPDK_BLOBID_INVALID;
 
 	blob->state = SPDK_BLOB_STATE_DIRTY;
-	blob->u.shallow_copy.copied_clusters_number = 0;
-	blob->u.shallow_copy.num_clusters_to_copy = 0;
+	blob->u.shallow_copy.bserrno = 1;
 	blob->extent_rle_found = false;
 	blob->extent_table_found = false;
 	blob->active.num_pages = 1;
@@ -5888,11 +5887,7 @@ spdk_blob_get_shallow_copy_copied_clusters(struct spdk_blob *blob)
 {
 	assert(blob != NULL);
 
-	if (blob->u.shallow_copy.num_clusters_to_copy > 0) {
-		return blob->u.shallow_copy.copied_clusters_number;
-	} else {
-		return UINT64_MAX;
-	}
+	return blob->u.shallow_copy.copied_clusters_number;
 }
 
 uint64_t
@@ -5901,6 +5896,14 @@ spdk_blob_get_shallow_copy_total_clusters(struct spdk_blob *blob)
 	assert(blob != NULL);
 
 	return blob->u.shallow_copy.num_clusters_to_copy;
+}
+
+int
+spdk_blob_get_shallow_copy_result(struct spdk_blob *blob)
+{
+	assert(blob != NULL);
+
+	return blob->u.shallow_copy.bserrno;
 }
 
 /* START spdk_bs_create_blob */
@@ -6971,6 +6974,7 @@ static void
 bs_shallow_copy_cleanup_finish(void *cb_arg, int bserrno)
 {
 	struct shallow_copy_ctx *ctx = cb_arg;
+	struct spdk_blob *_blob = ctx->blob;
 	struct spdk_bs_cpl *cpl = &ctx->cpl;
 
 	if (bserrno != 0) {
@@ -6979,6 +6983,8 @@ bs_shallow_copy_cleanup_finish(void *cb_arg, int bserrno)
 			ctx->bserrno = bserrno;
 		}
 	}
+
+	_blob->u.shallow_copy.bserrno = ctx->bserrno;
 
 	ctx->ext_dev->destroy_channel(ctx->ext_dev, ctx->ext_channel);
 	spdk_free(ctx->read_buff);
@@ -6997,9 +7003,8 @@ bs_shallow_copy_bdev_write_cpl(struct spdk_io_channel *channel, void *cb_arg, in
 	if (bserrno != 0) {
 		SPDK_ERRLOG("Shallow copy ext dev write error %d\n", bserrno);
 		ctx->bserrno = bserrno;
+		_blob->u.shallow_copy.bserrno = bserrno;
 		_blob->locked_operation_in_progress = false;
-		_blob->u.shallow_copy.copied_clusters_number = 0;
-		_blob->u.shallow_copy.num_clusters_to_copy = 0;
 		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
 		return;
 	}
@@ -7020,9 +7025,8 @@ bs_shallow_copy_blob_read_cpl(void *cb_arg, int bserrno)
 	if (bserrno != 0) {
 		SPDK_ERRLOG("Shallow copy blob read error %d\n", bserrno);
 		ctx->bserrno = bserrno;
+		_blob->u.shallow_copy.bserrno = bserrno;
 		_blob->locked_operation_in_progress = false;
-		_blob->u.shallow_copy.copied_clusters_number = 0;
-		_blob->u.shallow_copy.num_clusters_to_copy = 0;
 		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
 		return;
 	}
@@ -7046,9 +7050,8 @@ bs_shallow_copy_cluster_find_next(void *cb_arg, int bserrno)
 	if (bserrno != 0) {
 		SPDK_ERRLOG("Shallow copy bdev write error %d\n", bserrno);
 		ctx->bserrno = bserrno;
+		_blob->u.shallow_copy.bserrno = bserrno;
 		_blob->locked_operation_in_progress = false;
-		_blob->u.shallow_copy.copied_clusters_number = 0;
-		_blob->u.shallow_copy.num_clusters_to_copy = 0;
 		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
 		return;
 	}
@@ -7067,8 +7070,6 @@ bs_shallow_copy_cluster_find_next(void *cb_arg, int bserrno)
 					      bs_dev_byte_to_lba(_blob->bs->dev, _blob->bs->cluster_sz),
 					      bs_shallow_copy_blob_read_cpl, ctx, SPDK_BLOB_READ);
 	} else {
-		_blob->u.shallow_copy.copied_clusters_number = 0;
-		_blob->u.shallow_copy.num_clusters_to_copy = 0;
 		_blob->locked_operation_in_progress = false;
 		spdk_blob_close(_blob, bs_shallow_copy_cleanup_finish, ctx);
 	}
@@ -7117,6 +7118,10 @@ bs_shallow_copy_blob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int bserrno
 	}
 
 	_blob->locked_operation_in_progress = true;
+
+	_blob->u.shallow_copy.copied_clusters_number = 0;
+	_blob->u.shallow_copy.num_clusters_to_copy = 0;
+	_blob->u.shallow_copy.bserrno = 0;
 
 	for (i = 0; i < _blob->active.num_clusters; i++) {
 		if (_blob->active.clusters[i] != 0) {

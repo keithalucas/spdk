@@ -518,26 +518,38 @@ uint64_t spdk_blob_get_next_unallocated_io_unit(struct spdk_blob *blob, uint64_t
 /**
  * Get the number of copied clusters of a shallow copy operation
 
- * If a shallow copy of the blob is in progress, this functions returns the number of already
- * copied clusters.
+ * If a shallow copy of the blob is in progress or it is ended, this function returns
+ * the number of copied clusters.
  *
  * \param blob Blob struct to query.
  *
- * \return cluster index or UINT64_MAX if no shallow copy is in progress
+ * \return number of copied clusters.
  */
 uint64_t spdk_blob_get_shallow_copy_copied_clusters(struct spdk_blob *blob);
 
 /**
  * Get the total number of clusters to be copied in a shallow copy operation
 
- * If a shallow copy of the blob is in progress, this functions returns the total number
- * of cluster involved in the operation.
+ * If a shallow copy of the blob is in progress or it is ended, this function returns
+ * the total number of clusters to be copied.
  *
  * \param blob Blob struct to query.
  *
- * \return total number, 0 if no shallow copy is in progress
+ * \return total number of clusters.
  */
 uint64_t spdk_blob_get_shallow_copy_total_clusters(struct spdk_blob *blob);
+
+/**
+ * Get the result of last shallow copy operation
+
+ * If a shallow copy of the blob is in progress or it is ended, this function returns
+ * the result of the operation.
+ *
+ * \param blob Blob struct to query.
+ *
+ * \return 0 on success, negative errno on failure.
+ */
+int spdk_blob_get_shallow_copy_result(struct spdk_blob *blob);
 
 struct spdk_blob_xattr_opts {
 	/* Number of attributes */
