@@ -652,7 +652,7 @@ lvs_opts_copy(const struct spdk_lvs_opts *src, struct spdk_lvs_opts *dst)
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_lvs_opts) == 88, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_lvs_opts) == 280, "Incorrect size");
 
 #undef FIELD_OK
 #undef SET_FIELD
