@@ -10335,6 +10335,48 @@ Example response:
 }
 ~~~
 
+### bdev_raid_add_base_bdev {#rpc_bdev_raid_add_base_bdev}
+
+Add a base bdev to an existing raid bdev.
+Optionally a read/write mode for the base bdev can be passed.
+Modes can be handled with `bdev_raid_set_base_bdev_mode`.
+The default mode is `"rw"`, raid1 supports also `"wo"`.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+raid_name               | Required | string      | Raid bdev name
+base_name               | Required | string      | Base bdev name
+mode                    | Optional | string      | read/write mode
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_raid_set_base_bdev_mode",
+  "id": 1,
+  "params": {
+    "raid_name": "Raid1",
+    "base_name": "Nvme1n1",
+    "mode": "wo",
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
 ## SPLIT
 
 ### bdev_split_create {#rpc_bdev_split_create}

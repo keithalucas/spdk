@@ -2150,6 +2150,21 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('mode', help="""read/write mode. 'rw' or 'ro' or 'wo'.""")
     p.set_defaults(func=bdev_raid_set_base_bdev_mode)
 
+    def bdev_raid_add_base_bdev(args):
+        rpc.bdev.bdev_raid_add_base_bdev(args.client,
+                                         raid_name=args.raid_name,
+                                         base_name=args.base_name,
+                                         mode=args.mode)
+    p = subparsers.add_parser('bdev_raid_add_base_bdev',
+                              help="""Add a base bdev to an existing raid bdev.
+                                      Optionally a read/write mode for the base bdev can be passed.
+                                      Modes can be handled with the RPC bdev_raid_set_base_bdev_mode.
+                                      The default mode is 'rw', raid1 supports also 'wo'.""")
+    p.add_argument('raid_name', help='raid bdev name')
+    p.add_argument('base_name', help='base bdev name')
+    p.add_argument('-m', '--mode', help="""read/write mode. 'rw' or 'ro' or 'wo'.'rw' is the default""", required=False)
+    p.set_defaults(func=bdev_raid_add_base_bdev)
+
     # split
     def bdev_split_create(args):
         print_array(rpc.bdev.bdev_split_create(args.client,

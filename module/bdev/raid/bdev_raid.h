@@ -210,6 +210,9 @@ struct raid_bdev {
 
 	/* Superblock write context */
 	void				*sb_write_ctx;
+
+	/* A flag to indicate that an operation to add a base bdev is in progress */
+	bool				base_bdev_updating;
 };
 
 #define RAID_FOR_EACH_BASE_BDEV(r, i) \
@@ -253,7 +256,8 @@ int raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bde
 		     enum raid_level level, struct raid_bdev **raid_bdev_out,
 		     const struct spdk_uuid *uuid, bool superblock);
 void raid_bdev_delete(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn, void *cb_ctx);
-int raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t slot);
+int raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t slot,
+			      enum raid_base_bdev_mode mode);
 struct raid_bdev *raid_bdev_find_by_name(const char *name);
 enum raid_level raid_bdev_str_to_level(const char *str);
 const char *raid_bdev_level_to_str(enum raid_level level);
@@ -265,6 +269,9 @@ void raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_wri
 int raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev);
 int raid_bdev_set_base_bdev_mode(struct spdk_bdev *base_bdev, enum raid_base_bdev_mode mode,
 				 raid_bdev_destruct_cb cb_fn, void *cb_arg);
+int raid_bdev_add_base_bdev(struct raid_bdev *raid_bdev, char *base_bdev_name,
+			    enum raid_base_bdev_mode mode,
+			    raid_bdev_destruct_cb cb_fn, void *cb_arg);
 
 /*
  * RAID module descriptor
@@ -333,6 +340,9 @@ struct raid_bdev_module {
 
 	/* Tell if read and write mode setting for base bdevs is supported */
 	enum raid_base_bdev_mode rw_mode_supported[RAID_BASE_BDEV_MODE_MAX];
+
+	bool (*channel_add_base_bdev)(struct raid_bdev *raid_bdev,
+				      struct raid_bdev_io_channel *raid_ch);
 };
 
 void raid_bdev_module_list_add(struct raid_bdev_module *raid_module);

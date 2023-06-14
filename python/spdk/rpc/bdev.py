@@ -471,6 +471,25 @@ def bdev_raid_set_base_bdev_mode(client, name, mode):
     return client.call('bdev_raid_set_base_bdev_mode', params)
 
 
+def bdev_raid_add_base_bdev(client, raid_name, base_name, mode=None):
+    """Add a base bdev to an existing raid bdev
+
+    Args:
+        raid_name: raid bdev name
+        base_name: base bdev name
+        mode: read/write mode (optional)
+
+    Returns:
+        None
+    """
+    params = {'raid_name': raid_name, 'base_name': base_name}
+
+    if mode:
+        params['mode'] = mode
+
+    return client.call('bdev_raid_add_base_bdev', params)
+
+
 def bdev_aio_create(client, filename, name, block_size=None, readonly=False):
     """Construct a Linux AIO block device.
 
