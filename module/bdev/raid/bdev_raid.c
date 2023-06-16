@@ -1882,9 +1882,76 @@ raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev)
 
 struct raid_bdev_set_base_bdev_mode_ctx {
 	struct raid_base_bdev_info *base_info;
+	int status;
 	raid_bdev_destruct_cb cb_fn;
 	void *cb_arg;
 };
+
+static void
+raid_bdev_set_base_bdev_mode_on_resumed(void *_ctx, int rc)
+{
+	struct raid_bdev_set_base_bdev_mode_ctx *ctx = _ctx;
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	raid_bdev->base_bdev_updating = false;
+
+	if (rc && !ctx->status) {
+		ctx->status = rc;
+	}
+
+	ctx->cb_fn(ctx->cb_arg, ctx->status);
+	free(ctx);
+}
+
+static void
+raid_bdev_set_base_bdev_mode_write_sb_cb(bool success, struct raid_bdev *raid_bdev, void *_ctx)
+{
+	struct raid_bdev_set_base_bdev_mode_ctx *ctx = _ctx;
+
+	if (!success) {
+		SPDK_ERRLOG("Failed to write raid bdev '%s' superblock\n", raid_bdev->bdev.name);
+		ctx->status = -EIO;
+	}
+
+	raid_bdev_resume(raid_bdev, raid_bdev_set_base_bdev_mode_on_resumed, ctx);
+}
+
+static void
+raid_bdev_set_base_bdev_mode_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev_set_base_bdev_mode_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	ctx->status = status;
+
+	if (!ctx->status && raid_bdev->sb) {
+		struct raid_bdev_superblock *sb = raid_bdev->sb;
+		struct raid_bdev_sb_base_bdev *sb_base_bdev;
+		int rc;
+		uint8_t i;
+
+		/* Find base bdev in super block */
+		for (i = 0; i < sb->base_bdevs_size; i++) {
+			sb_base_bdev = &sb->base_bdevs[i];
+			if (spdk_uuid_compare(&sb_base_bdev->uuid, &base_info->uuid) == 0) {
+				break;
+			}
+		}
+
+		assert(i < sb->base_bdevs_size);
+
+		sb_base_bdev->mode = base_info->mode;
+
+		rc = raid_bdev_write_superblock(raid_bdev, raid_bdev_set_base_bdev_mode_write_sb_cb, ctx);
+		if (rc != 0) {
+			raid_bdev_set_base_bdev_mode_write_sb_cb(false, raid_bdev, ctx);
+		}
+	} else {
+		raid_bdev_resume(raid_bdev, raid_bdev_set_base_bdev_mode_on_resumed, ctx);
+	}
+}
 
 static void
 raid_bdev_channel_set_base_bdev_mode(struct spdk_io_channel_iter *i)
@@ -1902,18 +1969,6 @@ raid_bdev_channel_set_base_bdev_mode(struct spdk_io_channel_iter *i)
 	}
 
 	spdk_for_each_channel_continue(i, 0);
-}
-
-static void
-raid_bdev_set_base_bdev_mode_done(struct spdk_io_channel_iter *i, int status)
-{
-	struct raid_bdev_set_base_bdev_mode_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
-	struct raid_base_bdev_info *base_info = ctx->base_info;
-	struct raid_bdev *raid_bdev = base_info->raid_bdev;
-
-	raid_bdev->base_bdev_updating = false;
-	raid_bdev_resume(raid_bdev, ctx->cb_fn, ctx->cb_arg);
-	free(ctx);
 }
 
 static void
@@ -1943,6 +1998,7 @@ raid_bdev_set_base_bdev_mode(struct spdk_bdev *base_bdev, enum raid_base_bdev_mo
 	uint8_t rw_operational = 0;
 	int i;
 
+	assert(base_bdev != NULL);
 	SPDK_DEBUGLOG(bdev_raid, "%s\n", base_bdev->name);
 
 	/* Find the raid_bdev which has claimed this base_bdev */
@@ -1994,7 +2050,12 @@ raid_bdev_set_base_bdev_mode(struct spdk_bdev *base_bdev, enum raid_base_bdev_mo
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
 
-	return raid_bdev_suspend(raid_bdev, raid_bdev_set_base_bdev_mode_on_suspended, ctx);
+	i = raid_bdev_suspend(raid_bdev, raid_bdev_set_base_bdev_mode_on_suspended, ctx);
+	if (i != 0) {
+		free(ctx);
+	}
+
+	return i;
 }
 
 struct raid_bdev_add_base_bdev_ctx {
