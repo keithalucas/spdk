@@ -393,6 +393,9 @@ write_string_or_name(struct spdk_json_write_ctx *w, const char *val, size_t len)
 {
 	const uint8_t *p = val;
 	const uint8_t *end = val + len;
+	bool failed = false;
+	int retval;
+	
 
 	if (emit(w, "\"", 1)) { return fail(w); }
 
@@ -415,14 +418,25 @@ write_string_or_name(struct spdk_json_write_ctx *w, const char *val, size_t len)
 			codepoint = utf8_decode_unsafe_4(p);
 			break;
 		default:
-			return fail(w);
+			failed = true;
+			break;
+		}
+
+		if (failed) {
+			break;
 		}
 
 		if (write_codepoint(w, codepoint)) { return fail(w); }
 		p += codepoint_len;
 	}
 
-	return emit(w, "\"", 1);
+	// Always append "\"" in the end of string
+	retval = emit(w, "\"", 1);
+
+	if (failed) {
+		return fail(w);
+	}
+	return retval;
 }
 
 static int
