@@ -445,6 +445,22 @@ bool spdk_lvol_is_degraded(const struct spdk_lvol *lvol);
 void spdk_lvol_shallow_copy(struct spdk_lvol *lvol, struct spdk_bs_dev *ext_dev,
 			    spdk_lvol_op_complete cb_fn, void *cb_arg);
 
+/**
+ * Change the parent of a lvol
+ *
+ * This call set a snapshot as the parent of a lvol, making the lvol a clone of this snapshot.
+ * The previous parent of the lvol can be another snapshot or an external snapshot, if the lvol
+ * is not a clone must be thin-provisioned.
+ * Lvol and parent snapshot must have the same size and must belong to the same lvol store.
+ *
+ * \param lvol Handle to lvol
+ * \param snapshot Handle to the parent snapshot
+ * \param cb_fn Completion callback
+ * \param cb_arg Completion callback custom arguments
+ */
+void spdk_lvol_set_parent(struct spdk_lvol *lvol, struct spdk_lvol *snapshot,
+			  spdk_lvol_op_complete cb_fn, void *cb_arg);
+
 #ifdef __cplusplus
 }
 #endif
