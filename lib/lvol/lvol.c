@@ -2600,3 +2600,87 @@ spdk_lvol_shallow_copy(struct spdk_lvol *lvol, struct spdk_bs_dev *ext_dev,
 	spdk_bs_blob_shallow_copy(lvol->lvol_store->blobstore, req->channel, blob_id, ext_dev,
 				  lvol_shallow_copy_cb, req);
 }
+
+static void
+lvol_set_parent_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_req *req = cb_arg;
+
+	if (lvolerrno < 0) {
+		SPDK_ERRLOG("could not set parent of lvol %s, error %d\n", req->lvol->name, lvolerrno);
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+void
+spdk_lvol_set_parent(struct spdk_lvol *lvol, struct spdk_lvol *snapshot,
+		     spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_req *req;
+	spdk_blob_id blob_id, snapshot_id;
+	uint64_t lvol_size, snapshot_size;
+
+	assert(cb_fn != NULL);
+
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol must not be NULL\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	if (snapshot == NULL) {
+		SPDK_ERRLOG("snapshot must not be NULL\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	if (!spdk_blob_is_thin_provisioned(lvol->blob)) {
+		SPDK_ERRLOG("%s must be thin-provisioned\n", lvol->name);
+		cb_fn(cb_arg, -EPERM);
+		return;
+	}
+
+	if (!spdk_blob_is_snapshot(snapshot->blob)) {
+		SPDK_ERRLOG("%s is not a snapshot\n", snapshot->name);
+		cb_fn(cb_arg, -EPERM);
+		return;
+	}
+
+	if (spdk_uuid_compare(&lvol->lvol_store->uuid, &snapshot->lvol_store->uuid) != 0) {
+		SPDK_ERRLOG("lvol %s and snapshot %s must be in the same lvol store\n",
+			    lvol->name, snapshot->name);
+		cb_fn(cb_arg, -EPERM);
+		return;
+	}
+
+	lvol_size = spdk_blob_get_num_clusters(lvol->blob) *
+		    spdk_bs_get_cluster_size(lvol->lvol_store->blobstore);
+
+	snapshot_size = spdk_blob_get_num_clusters(snapshot->blob) *
+			spdk_bs_get_cluster_size(snapshot->lvol_store->blobstore);
+	if (lvol_size != snapshot_size) {
+		SPDK_ERRLOG("%s and %s does not have same size\n",
+			    lvol->name, snapshot->name);
+		cb_fn(cb_arg, -EFBIG);
+		return;
+	}
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("cannot alloc memory for lvol request pointer\n");
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	req->lvol = lvol;
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+
+	blob_id = spdk_blob_get_id(lvol->blob);
+	snapshot_id = spdk_blob_get_id(snapshot->blob);
+
+	spdk_bs_blob_set_parent(lvol->lvol_store->blobstore, blob_id, snapshot_id,
+				lvol_set_parent_cb, req);
+}
