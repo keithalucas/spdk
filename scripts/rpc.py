@@ -2109,6 +2109,16 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
                                           uuid=args.uuid,
                                           lvs_name=args.lvs_name)
 
+    def bdev_lvol_set_parent(args):
+        rpc.lvol.bdev_lvol_set_parent(args.client,
+                                      lvol_name=args.lvol_name,
+                                      snapshot_name=args.snapshot_name)
+
+    p = subparsers.add_parser('bdev_lvol_set_parent', help='Set the parent snapshot of a lvol')
+    p.add_argument('lvol_name', help='lvol name')
+    p.add_argument('snapshot_name', help='snapshot name')
+    p.set_defaults(func=bdev_lvol_set_parent)
+
     p = subparsers.add_parser('bdev_lvol_delete_lvstore', help='Destroy an logical volume store')
     p.add_argument('-u', '--uuid', help='lvol store UUID', required=False)
     p.add_argument('-l', '--lvs-name', help='lvol store name', required=False)
