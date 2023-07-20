@@ -302,6 +302,20 @@ def bdev_lvol_get_fragmap(client, name, offset=0, size=0):
     return client.call('bdev_lvol_get_fragmap', params)
 
 
+def bdev_lvol_set_parent(client, lvol_name, snapshot_name):
+    """Set the parent snapshot of a lvol
+
+    Args:
+        lvol_name: name of the lvol to set parent of
+        snapshot_name: name of the snapshot to become parent of lvol
+    """
+    params = {
+        'lvol_name': lvol_name,
+        'snapshot_name': snapshot_name
+    }
+    return client.call('bdev_lvol_set_parent', params)
+
+
 def bdev_lvol_delete_lvstore(client, uuid=None, lvs_name=None):
     """Destroy a logical volume store.
 
