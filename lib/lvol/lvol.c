@@ -1549,6 +1549,42 @@ spdk_lvol_rename(struct spdk_lvol *lvol, const char *new_name,
 	spdk_blob_sync_md(blob, lvol_rename_cb, req);
 }
 
+static void
+lvol_set_xattr_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_req *req = cb_arg;
+
+	req->cb_fn(req->cb_arg,  lvolerrno);
+	free(req);
+}
+
+void
+spdk_lvol_set_xattr(struct spdk_lvol *lvol, const char *name, const char *value,
+		    spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_blob *blob = lvol->blob;
+	struct spdk_lvol_req *req;
+	int rc;
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("Cannot alloc memory for lvol request pointer\n");
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+
+	rc = spdk_blob_set_xattr(blob, name, value, strlen(value) + 1);
+	if (rc < 0) {
+		free(req);
+		cb_fn(cb_arg, rc);
+		return;
+	}
+
+	spdk_blob_sync_md(blob, lvol_set_xattr_cb, req);
+}
+
 void
 spdk_lvol_destroy(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_arg)
 {

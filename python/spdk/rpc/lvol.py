@@ -161,6 +161,22 @@ def bdev_lvol_rename(client, old_name, new_name):
     return client.call('bdev_lvol_rename', params)
 
 
+def bdev_lvol_set_xattr(client, name, xattr_name, xattr_value):
+    """Set extended attribute on a logical volume.
+
+    Args:
+        name: name of logical volume
+        xattr_name: name of extended attribute
+        xattr_value: value of extended attribute
+    """
+    params = {
+        'name': name,
+        'xattr_name': xattr_name,
+        'xattr_value': xattr_value,
+    }
+    return client.call('bdev_lvol_set_xattr', params)
+
+
 def bdev_lvol_resize(client, name, size_in_mib):
     """Resize a logical volume.
 
