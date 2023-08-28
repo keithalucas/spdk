@@ -215,4 +215,8 @@ bdev_lvol_set_parent_bdev lvol_name esnap_name
     Set the parent external snapshot of a lvol
     optional arguments:
     -h, --help  show help
+bdev_lvol_set_xattr [-h] name xattr_name xattr_value
+    Set xattr for lvol bdev
+    optional arguments:
+    -h, --help  show help
 ```

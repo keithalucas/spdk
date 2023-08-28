@@ -10649,6 +10649,18 @@ Example response:
 ]
 ~~~
 
+### bdev_lvol_set_xattr {#rpc_bdev_lvol_set_xattr}
+
+Set xattr for lvol bdev
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of lvol
+xattr_name              | Required | string      | Name of the xattr
+xattr_value             | Required | string      | Value of the xattr
+
 ### bdev_lvol_set_parent {#rpc_bdev_lvol_set_parent}
 
 Set a snapshot as the parent of a lvol, making the lvol a clone of this snapshot.
