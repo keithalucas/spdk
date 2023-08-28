@@ -698,6 +698,86 @@ cleanup:
 
 SPDK_RPC_REGISTER("bdev_lvol_rename", rpc_bdev_lvol_rename, SPDK_RPC_RUNTIME)
 
+
+struct rpc_bdev_lvol_set_xattr {
+	char *name;
+	char *xattr_name;
+	char *xattr_value;
+};
+
+static void
+free_rpc_bdev_lvol_set_xattr(struct rpc_bdev_lvol_set_xattr *req)
+{
+	free(req->name);
+	free(req->xattr_name);
+	free(req->xattr_value);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_lvol_set_xattr_decoders[] = {
+	{"name", offsetof(struct rpc_bdev_lvol_set_xattr, name), spdk_json_decode_string},
+	{"xattr_name", offsetof(struct rpc_bdev_lvol_set_xattr, xattr_name), spdk_json_decode_string},
+	{"xattr_value", offsetof(struct rpc_bdev_lvol_set_xattr, xattr_value), spdk_json_decode_string},
+};
+
+static void
+rpc_bdev_lvol_set_xattr_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_jsonrpc_request *request = cb_arg;
+
+	if (lvolerrno != 0) {
+		goto invalid;
+	}
+
+	spdk_jsonrpc_send_bool_response(request, true);
+	return;
+
+invalid:
+	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+					 spdk_strerror(-lvolerrno));
+}
+
+static void
+rpc_bdev_lvol_set_xattr(struct spdk_jsonrpc_request *request,
+			const struct spdk_json_val *params)
+{
+	struct rpc_bdev_lvol_set_xattr req = {};
+	struct spdk_bdev *bdev;
+	struct spdk_lvol *lvol;
+
+	SPDK_INFOLOG(lvol_rpc, "Setting lvol xattr\n");
+
+	if (spdk_json_decode_object(params, rpc_bdev_lvol_set_xattr_decoders,
+				    SPDK_COUNTOF(rpc_bdev_lvol_set_xattr_decoders),
+				    &req)) {
+		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(req.name);
+	if (bdev == NULL) {
+		SPDK_ERRLOG("bdev '%s' does not exist\n", req.name);
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	lvol = vbdev_lvol_get_from_bdev(bdev);
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	vbdev_lvol_set_xattr(lvol, req.xattr_name, req.xattr_value, rpc_bdev_lvol_set_xattr_cb, request);
+
+cleanup:
+	free_rpc_bdev_lvol_set_xattr(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_set_xattr", rpc_bdev_lvol_set_xattr, SPDK_RPC_RUNTIME)
+
+
 struct rpc_bdev_lvol_inflate {
 	char *name;
 };

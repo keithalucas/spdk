@@ -1357,6 +1357,36 @@ vbdev_lvol_rename(struct spdk_lvol *lvol, const char *new_lvol_name,
 }
 
 static void
+_vbdev_lvol_set_xattr_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_req *req = cb_arg;
+
+	if (lvolerrno != 0) {
+		SPDK_ERRLOG("Setting xattr failed\n");
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+void
+vbdev_lvol_set_xattr(struct spdk_lvol *lvol, const char *name,
+		     const char *value, spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_req *req;
+
+	req = calloc(1, sizeof(*req));
+	if (req == NULL) {
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+
+	spdk_lvol_set_xattr(lvol, name, value, _vbdev_lvol_set_xattr_cb, req);
+}
+
+static void
 _vbdev_lvol_resize_cb(void *cb_arg, int lvolerrno)
 {
 	struct spdk_lvol_req *req = cb_arg;
