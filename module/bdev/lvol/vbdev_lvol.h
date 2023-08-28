@@ -71,6 +71,17 @@ void vbdev_lvol_rename(struct spdk_lvol *lvol, const char *new_lvol_name,
 		       spdk_lvol_op_complete cb_fn, void *cb_arg);
 
 /**
+ * \brief Set lvol's xattr
+ * \param lvol Handle to lvol
+ * \param name xattr name
+ * \param value xattr value
+ * \param cb_fn Completion callback
+ * \param cb_arg Completion callback custom arguments
+ */
+void vbdev_lvol_set_xattr(struct spdk_lvol *lvol, const char *name,
+			  const char *value, spdk_lvol_op_complete cb_fn, void *cb_arg);
+
+/**
  * Destroy a logical volume
  * \param lvol Handle to lvol
  * \param cb_fn Completion callback
