@@ -262,6 +262,19 @@ spdk_lvol_rename(struct spdk_lvol *lvol, const char *new_name,
 		 spdk_lvol_op_complete cb_fn, void *cb_arg);
 
 /**
+ * Set lvol's xattr.
+ *
+ * \param lvol Handle to lvol.
+ * \param name xattr name.
+ * \param value xattr value.
+ * \param cb_fn Completion callback.
+ * \param cb_arg Completion callback custom arguments.
+ */
+void
+spdk_lvol_set_xattr(struct spdk_lvol *lvol, const char *name, const char *value,
+		    spdk_lvol_op_complete cb_fn, void *cb_arg);
+
+/**
  * \brief Returns if it is possible to delete an lvol (i.e. lvol is not a snapshot that have at least one clone).
  * \param lvol Handle to lvol
  */

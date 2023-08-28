@@ -1999,6 +1999,18 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
     p.add_argument('new_name', help='new lvol name')
     p.set_defaults(func=bdev_lvol_rename)
 
+    def bdev_lvol_set_xattr(args):
+        rpc.lvol.bdev_lvol_set_xattr(args.client,
+                                     name=args.name,
+                                     xattr_name=args.xattr_name,
+                                     xattr_value=args.xattr_value)
+
+    p = subparsers.add_parser('bdev_lvol_set_xattr', help='Set xattr for lvol bdev')
+    p.add_argument('name', help='lvol bdev name')
+    p.add_argument('xattr_name', help='xattr name')
+    p.add_argument('xattr_value', help='xattr value')
+    p.set_defaults(func=bdev_lvol_set_xattr)
+
     def bdev_lvol_inflate(args):
         rpc.lvol.bdev_lvol_inflate(args.client,
                                    name=args.name)
