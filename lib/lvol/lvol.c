@@ -1585,6 +1585,15 @@ spdk_lvol_set_xattr(struct spdk_lvol *lvol, const char *name, const char *value,
 	spdk_blob_sync_md(blob, lvol_set_xattr_cb, req);
 }
 
+int
+spdk_lvol_get_xattr(struct spdk_lvol *lvol, const char *name,
+		    const void **value, size_t *value_len)
+{
+	struct spdk_blob *blob = lvol->blob;
+
+	return spdk_blob_get_xattr_value(blob, name, value, value_len);
+}
+
 void
 spdk_lvol_destroy(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_arg)
 {
