@@ -275,6 +275,18 @@ spdk_lvol_set_xattr(struct spdk_lvol *lvol, const char *name, const char *value,
 		    spdk_lvol_op_complete cb_fn, void *cb_arg);
 
 /**
+ * Get lvol's xattr.
+ *
+ * \param lvol Handle to lvol.
+ * \param name Xattr name.
+ * \param value Xattr value.
+ * \param value_len Xattr value length.
+ */
+int
+spdk_lvol_get_xattr(struct spdk_lvol *lvol, const char *name,
+		    const void **value, size_t *value_len);
+
+/**
  * \brief Returns if it is possible to delete an lvol (i.e. lvol is not a snapshot that have at least one clone).
  * \param lvol Handle to lvol
  */
