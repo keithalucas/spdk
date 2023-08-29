@@ -2098,7 +2098,7 @@ test_raid_suspend_resume(void)
 	SPDK_CU_ASSERT_FATAL(rc == 0);
 	poll_threads();
 	CU_ASSERT(suspend_cb_called == true);
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 	poll_threads();
 
 	/* suspend/resume with one idle io channel */
@@ -2112,7 +2112,7 @@ test_raid_suspend_resume(void)
 	poll_threads();
 	CU_ASSERT(suspend_cb_called == true);
 	CU_ASSERT(raid_ch->is_suspended == true);
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 	poll_threads();
 	CU_ASSERT(raid_ch->is_suspended == false);
 
@@ -2132,13 +2132,13 @@ test_raid_suspend_resume(void)
 	SPDK_CU_ASSERT_FATAL(rc == 0);
 	CU_ASSERT(suspend_cb_called == true);
 
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 	poll_threads();
 	CU_ASSERT(raid_ch->is_suspended == true);
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 	poll_threads();
 	CU_ASSERT(raid_ch->is_suspended == true);
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 	poll_threads();
 	CU_ASSERT(raid_ch->is_suspended == false);
 
@@ -2167,7 +2167,7 @@ test_raid_suspend_resume(void)
 	CU_ASSERT(raid_ch->num_ios == 0);
 	CU_ASSERT(TAILQ_FIRST(&raid_ch->suspended_ios) == (struct raid_bdev_io *)bdev_io->driver_ctx);
 
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 	poll_threads();
 	CU_ASSERT(raid_ch->is_suspended == false);
 	verify_io(bdev_io, req.base_bdevs.num_base_bdevs, raid_ch, pbdev, g_child_io_status_flag);
@@ -2245,7 +2245,7 @@ test_raid_suspend_resume_create_ch(void)
 	CU_ASSERT(raid_ch1->is_suspended == true);
 	CU_ASSERT(raid_ch2->is_suspended == true);
 	set_thread(0);
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 	poll_threads();
 	CU_ASSERT(raid_ch1->is_suspended == false);
 	CU_ASSERT(raid_ch2->is_suspended == false);
@@ -2261,7 +2261,7 @@ test_raid_suspend_resume_create_ch(void)
 	poll_threads();
 	CU_ASSERT(suspend_cb_called == true);
 	CU_ASSERT(raid_ch1->is_suspended == true);
-	raid_bdev_resume(pbdev);
+	raid_bdev_resume(pbdev, NULL, NULL);
 
 	set_thread(2);
 	ch2 = spdk_get_io_channel(pbdev);
