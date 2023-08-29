@@ -19,10 +19,10 @@
 	SPDK_ALIGN_CEIL((sizeof(struct raid_bdev_superblock) + UINT8_MAX * sizeof(struct raid_bdev_sb_base_bdev)), 0x1000)
 
 enum raid_bdev_sb_base_bdev_state {
-	RAID_SB_BASE_BDEV_MISSING	= 0,
+	RAID_SB_BASE_BDEV_MISSING		= 0,
 	RAID_SB_BASE_BDEV_CONFIGURED	= 1,
-	RAID_SB_BASE_BDEV_FAILED	= 2,
-	RAID_SB_BASE_BDEV_SPARE		= 3,
+	RAID_SB_BASE_BDEV_FAILED		= 2,
+	RAID_SB_BASE_BDEV_REMOVED		= 3,
 };
 
 struct raid_bdev_sb_base_bdev {
