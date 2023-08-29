@@ -1590,6 +1590,25 @@ raid_bdev_suspend(struct raid_bdev *raid_bdev, raid_bdev_suspended_cb cb, void *
 	return 0;
 }
 
+typedef void (*raid_bdev_resumed_cb)(void *cb_ctx, int rc);
+
+struct raid_bdev_resume_ctx {
+	raid_bdev_resumed_cb resumed_cb;
+	void *resumed_cb_ctx;
+};
+
+static void
+raid_bdev_resume_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev_resume_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+
+	if (ctx->resumed_cb) {
+		ctx->resumed_cb(ctx->resumed_cb_ctx, status);
+	}
+
+	free(ctx);
+}
+
 static void
 raid_bdev_channel_resume(struct spdk_io_channel_iter *i)
 {
@@ -1611,7 +1630,7 @@ raid_bdev_channel_resume(struct spdk_io_channel_iter *i)
 }
 
 static void
-raid_bdev_resume(struct raid_bdev *raid_bdev)
+raid_bdev_resume(struct raid_bdev *raid_bdev, raid_bdev_resumed_cb cb, void *cb_ctx)
 {
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 	assert(raid_bdev->suspend_cnt > 0);
@@ -1621,7 +1640,19 @@ raid_bdev_resume(struct raid_bdev *raid_bdev)
 	pthread_mutex_unlock(&raid_bdev->mutex);
 
 	if (raid_bdev->suspend_cnt == 0) {
-		spdk_for_each_channel(raid_bdev, raid_bdev_channel_resume, raid_bdev, NULL);
+		struct raid_bdev_resume_ctx *ctx;
+
+		ctx = malloc(sizeof(*ctx));
+		if (ctx == NULL) {
+			cb(cb_ctx, -ENOMEM);
+			return;
+		}
+		ctx->resumed_cb = cb;
+		ctx->resumed_cb_ctx = cb_ctx;
+
+		spdk_for_each_channel(raid_bdev, raid_bdev_channel_resume, ctx, raid_bdev_resume_done);
+	} else if (cb) {
+		cb(cb_ctx, 0);
 	}
 }
 
@@ -1650,7 +1681,7 @@ raid_bdev_remove_base_bdev_write_sb_cb(bool success, struct raid_bdev *raid_bdev
 		SPDK_ERRLOG("Failed to write raid bdev '%s' superblock\n", raid_bdev->bdev.name);
 	}
 
-	raid_bdev_resume(raid_bdev);
+	raid_bdev_resume(raid_bdev, NULL, NULL);
 }
 
 static void
@@ -1685,7 +1716,7 @@ raid_bdev_remove_base_bdev_done(struct spdk_io_channel_iter *i, int status)
 			raid_bdev_remove_base_bdev_write_sb_cb(false, raid_bdev);
 		}
 	} else {
-		raid_bdev_resume(raid_bdev);
+		raid_bdev_resume(raid_bdev, NULL, NULL);
 	}
 }
 
