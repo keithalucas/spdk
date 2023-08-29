@@ -698,7 +698,6 @@ cleanup:
 
 SPDK_RPC_REGISTER("bdev_lvol_rename", rpc_bdev_lvol_rename, SPDK_RPC_RUNTIME)
 
-
 struct rpc_bdev_lvol_set_xattr {
 	char *name;
 	char *xattr_name;
@@ -777,6 +776,75 @@ cleanup:
 
 SPDK_RPC_REGISTER("bdev_lvol_set_xattr", rpc_bdev_lvol_set_xattr, SPDK_RPC_RUNTIME)
 
+struct rpc_bdev_lvol_get_xattr {
+	char *name;
+	char *xattr_name;
+};
+
+static void
+free_rpc_bdev_lvol_get_xattr(struct rpc_bdev_lvol_get_xattr *req)
+{
+	free(req->name);
+	free(req->xattr_name);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_lvol_get_xattr_decoders[] = {
+	{"name", offsetof(struct rpc_bdev_lvol_get_xattr, name), spdk_json_decode_string},
+	{"xattr_name", offsetof(struct rpc_bdev_lvol_get_xattr, xattr_name), spdk_json_decode_string},
+};
+
+static void
+rpc_bdev_lvol_get_xattr(struct spdk_jsonrpc_request *request,
+			const struct spdk_json_val *params)
+{
+	struct rpc_bdev_lvol_get_xattr req = {};
+	struct spdk_json_write_ctx *w;
+	struct spdk_bdev *bdev;
+	struct spdk_lvol *lvol;
+	const void *xattr_value;
+	size_t xattr_value_len;
+	int rc;
+
+	SPDK_INFOLOG(lvol_rpc, "Getting lvol xattr\n");
+
+	if (spdk_json_decode_object(params, rpc_bdev_lvol_get_xattr_decoders,
+				    SPDK_COUNTOF(rpc_bdev_lvol_get_xattr_decoders),
+				    &req)) {
+		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(req.name);
+	if (bdev == NULL) {
+		SPDK_ERRLOG("bdev '%s' does not exist\n", req.name);
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	lvol = vbdev_lvol_get_from_bdev(bdev);
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	rc = vbdev_lvol_get_xattr(lvol, req.xattr_name, &xattr_value, &xattr_value_len);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 spdk_strerror(-rc));
+		goto cleanup;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_string(w, (const char *)xattr_value);
+	spdk_jsonrpc_end_result(request, w);
+cleanup:
+	free_rpc_bdev_lvol_get_xattr(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_get_xattr", rpc_bdev_lvol_get_xattr, SPDK_RPC_RUNTIME)
 
 struct rpc_bdev_lvol_inflate {
 	char *name;

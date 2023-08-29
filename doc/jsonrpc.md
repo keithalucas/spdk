@@ -10418,6 +10418,17 @@ name                    | Required | string      | UUID or alias of lvol
 xattr_name              | Required | string      | Name of the xattr
 xattr_value             | Required | string      | Value of the xattr
 
+### bdev_lvol_get_xattr {#rpc_bdev_lvol_get_xattr}
+
+Get xattr for lvol bdev
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of lvol
+xattr_name              | Required | string      | Name of the xattr
+
 ### bdev_lvol_shallow_copy {#rpc_bdev_lvol_shallow_copy}
 
 Make a shallow copy of lvol over a given bdev. Only cluster allocated to the lvol will be written on the bdev.

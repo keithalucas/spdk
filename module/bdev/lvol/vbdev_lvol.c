@@ -1386,6 +1386,13 @@ vbdev_lvol_set_xattr(struct spdk_lvol *lvol, const char *name,
 	spdk_lvol_set_xattr(lvol, name, value, _vbdev_lvol_set_xattr_cb, req);
 }
 
+int
+vbdev_lvol_get_xattr(struct spdk_lvol *lvol, const char *name,
+		     const void **value, size_t *value_len)
+{
+	return spdk_lvol_get_xattr(lvol, name, value, value_len);
+}
+
 static void
 _vbdev_lvol_resize_cb(void *cb_arg, int lvolerrno)
 {
