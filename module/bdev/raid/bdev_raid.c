@@ -45,6 +45,30 @@ raid_bdev_module_list_add(struct raid_bdev_module *raid_module)
 	}
 }
 
+static uint8_t
+raid_bdev_module_get_min_operational(struct raid_bdev_module *module, uint8_t num_base_bdevs)
+{
+	switch (module->base_bdevs_constraint.type) {
+	case CONSTRAINT_MAX_BASE_BDEVS_REMOVED:
+		return num_base_bdevs - module->base_bdevs_constraint.value;
+	case CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL:
+		return module->base_bdevs_constraint.value;
+	case CONSTRAINT_UNSET:
+		if (module->base_bdevs_constraint.value != 0) {
+			SPDK_ERRLOG("Unexpected constraint value '%u' provided for raid level '%s'.\n",
+				    (uint8_t)module->base_bdevs_constraint.value,
+				    raid_bdev_level_to_str(module->level));
+			return 0;
+		}
+		return num_base_bdevs;
+	default:
+		SPDK_ERRLOG("Unrecognised constraint type '%u' in module for raid level '%s'.\n",
+			    (uint8_t)module->base_bdevs_constraint.type,
+			    raid_bdev_level_to_str(module->level));
+		return 0;
+	}
+}
+
 /* Function declarations */
 static void	raid_bdev_examine(struct spdk_bdev *bdev);
 static int	raid_bdev_init(void);
@@ -1031,27 +1055,7 @@ _raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		return -EINVAL;
 	}
 
-	switch (module->base_bdevs_constraint.type) {
-	case CONSTRAINT_MAX_BASE_BDEVS_REMOVED:
-		min_operational = num_base_bdevs - module->base_bdevs_constraint.value;
-		break;
-	case CONSTRAINT_MIN_BASE_BDEVS_OPERATIONAL:
-		min_operational = module->base_bdevs_constraint.value;
-		break;
-	case CONSTRAINT_UNSET:
-		if (module->base_bdevs_constraint.value != 0) {
-			SPDK_ERRLOG("Unexpected constraint value '%u' provided for raid bdev '%s'.\n",
-				    (uint8_t)module->base_bdevs_constraint.value, name);
-			return -EINVAL;
-		}
-		min_operational = num_base_bdevs;
-		break;
-	default:
-		SPDK_ERRLOG("Unrecognised constraint type '%u' in module for raid level '%s'.\n",
-			    (uint8_t)module->base_bdevs_constraint.type,
-			    raid_bdev_level_to_str(module->level));
-		return -EINVAL;
-	};
+	min_operational = raid_bdev_module_get_min_operational(module, num_base_bdevs);
 
 	if (min_operational == 0 || min_operational > num_base_bdevs) {
 		SPDK_ERRLOG("Wrong constraint value for raid level '%s'.\n",
@@ -1708,8 +1712,7 @@ raid_bdev_remove_base_bdev_done(struct spdk_io_channel_iter *i, int status)
 
 		assert(i < sb->base_bdevs_size);
 
-		/* TODO: distinguish between failure and intentional removal */
-		sb_base_bdev->state = RAID_SB_BASE_BDEV_FAILED;
+		sb_base_bdev->state = RAID_SB_BASE_BDEV_REMOVED;
 
 		rc = raid_bdev_write_superblock(raid_bdev, raid_bdev_remove_base_bdev_write_sb_cb);
 		if (rc != 0) {
