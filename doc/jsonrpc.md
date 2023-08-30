@@ -10295,6 +10295,43 @@ Example response:
 }
 ~~~
 
+### bdev_raid_grow_base_bdev {#rpc_bdev_raid_grow_base_bdev}
+
+Add a base bdev to a raid bdev, growing the raid's size if needed
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+raid_name               | Required | string      | Raid bdev name
+base_name               | Required | string      | Base bdev name
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_raid_grow_base_bdev",
+  "id": 1,
+  "params": {
+    "raid_name": "Raid1",
+    "base_name": "Nvme1n1",
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
 ## SPLIT
 
 ### bdev_split_create {#rpc_bdev_split_create}
