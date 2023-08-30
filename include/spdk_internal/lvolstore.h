@@ -16,6 +16,9 @@
 /* Default size of blobstore cluster */
 #define SPDK_LVS_OPTS_CLUSTER_SZ (4 * 1024 * 1024)
 
+/* Creation time format in RFC 3339 format */
+#define SPDK_CREATION_TIME_MAX 21 /* 20 characters + null terminator */
+
 /* UUID + '_' + blobid (20 characters for uint64_t).
  * Null terminator is already included in SPDK_UUID_STRING_LEN. */
 #define SPDK_LVOL_UNIQUE_ID_MAX (SPDK_UUID_STRING_LEN + 1 + 20)
@@ -106,6 +109,7 @@ struct spdk_lvol {
 	char				name[SPDK_LVOL_NAME_MAX];
 	struct spdk_uuid		uuid;
 	char				uuid_str[SPDK_UUID_STRING_LEN];
+	char 				creation_time[SPDK_CREATION_TIME_MAX];
 	struct spdk_bdev		*bdev;
 	int				ref_count;
 	bool				action_in_progress;

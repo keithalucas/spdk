@@ -4569,6 +4569,12 @@ spdk_bdev_get_aliases(const struct spdk_bdev *bdev)
 	return &bdev->aliases;
 }
 
+const char *
+spdk_bdev_get_creation_time(const struct spdk_bdev *bdev)
+{
+	return bdev->creation_time;
+}
+
 uint32_t
 spdk_bdev_get_block_size(const struct spdk_bdev *bdev)
 {
