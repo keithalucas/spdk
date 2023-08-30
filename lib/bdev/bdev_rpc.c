@@ -633,6 +633,7 @@ rpc_dump_bdev_info(void *ctx, struct spdk_bdev *bdev)
 	struct spdk_bdev_alias *tmp;
 	uint64_t qos_limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
 	struct spdk_memory_domain **domains;
+	const char *creation_time_str;
 	int i, rc;
 
 	spdk_json_write_object_begin(w);
@@ -651,6 +652,12 @@ rpc_dump_bdev_info(void *ctx, struct spdk_bdev *bdev)
 	spdk_json_write_named_uint32(w, "block_size", spdk_bdev_get_block_size(bdev));
 	spdk_json_write_named_uint64(w, "num_blocks", spdk_bdev_get_num_blocks(bdev));
 	spdk_json_write_named_uuid(w, "uuid", &bdev->uuid);
+
+	creation_time_str = spdk_bdev_get_creation_time(bdev);
+	if (creation_time_str == NULL) {
+		creation_time_str = "";
+	}
+	spdk_json_write_named_string(w, "creation_time", creation_time_str);
 
 	if (spdk_bdev_get_md_size(bdev) != 0) {
 		spdk_json_write_named_uint32(w, "md_size", spdk_bdev_get_md_size(bdev));

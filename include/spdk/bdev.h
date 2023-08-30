@@ -604,6 +604,14 @@ const char *spdk_bdev_get_name(const struct spdk_bdev *bdev);
 const char *spdk_bdev_get_product_name(const struct spdk_bdev *bdev);
 
 /**
+ * Get block device creation time.
+ *
+ * \param bdev Block device to query.
+ * \return Creation time of bdev as a null-terminated string, or NULL if not present.
+ */
+const char *spdk_bdev_get_creation_time(const struct spdk_bdev *bdev);
+
+/**
  * Get block device logical block size.
  *
  * \param bdev Block device to query.

@@ -1144,6 +1144,7 @@ _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
 	assert((total_size % bdev->blocklen) == 0);
 	bdev->blockcnt = total_size / bdev->blocklen;
 	bdev->uuid = lvol->uuid;
+	bdev->creation_time = lvol->creation_time;
 	bdev->required_alignment = lvs_bdev->bdev->required_alignment;
 	bdev->split_on_optimal_io_boundary = true;
 	bdev->optimal_io_boundary = spdk_bs_get_cluster_size(lvol->lvol_store->blobstore) / bdev->blocklen;
