@@ -530,6 +530,13 @@ struct spdk_bdev {
 	 */
 	struct spdk_uuid uuid;
 
+	/**
+	 * Creation time for this bdev.
+	 *
+	 * If not provided, it will be NULL.
+	 */
+	const char *creation_time;
+
 	/** Size in bytes of a metadata for the backend */
 	uint32_t md_len;
 

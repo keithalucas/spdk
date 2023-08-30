@@ -1320,6 +1320,7 @@ rpc_dump_lvol(struct spdk_json_write_ctx *w, struct spdk_lvol *lvol)
 	spdk_json_write_named_string_fmt(w, "alias", "%s/%s", lvs->name, lvol->name);
 	spdk_json_write_named_string(w, "uuid", lvol->uuid_str);
 	spdk_json_write_named_string(w, "name", lvol->name);
+	spdk_json_write_named_string(w, "creation_time", lvol->creation_time);
 	spdk_json_write_named_bool(w, "is_thin_provisioned", spdk_blob_is_thin_provisioned(lvol->blob));
 	spdk_json_write_named_bool(w, "is_snapshot", spdk_blob_is_snapshot(lvol->blob));
 	spdk_json_write_named_bool(w, "is_clone", spdk_blob_is_clone(lvol->blob));
