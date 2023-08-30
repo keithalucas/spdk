@@ -12,6 +12,7 @@
 #include "bdev/raid/bdev_raid.c"
 #include "bdev/raid/bdev_raid_rpc.c"
 #include "bdev/raid/raid0.c"
+#include "bdev/raid/raid1.c"
 #include "common/lib/ut_multithread.c"
 
 #define MAX_BASE_DRIVES 32
@@ -954,13 +955,15 @@ verify_raid_bdev(struct rpc_bdev_raid_create *r, bool presence, uint32_t raid_st
 					min_blockcnt = base_info->data_size;
 				}
 			}
-			CU_ASSERT((((min_blockcnt / (r->strip_size_kb * 1024 / g_block_len)) *
-				    (r->strip_size_kb * 1024 / g_block_len)) *
-				   r->base_bdevs.num_base_bdevs) == pbdev->bdev.blockcnt);
+			if (r->strip_size_kb > 0) {
+				CU_ASSERT((((min_blockcnt / (r->strip_size_kb * 1024 / g_block_len)) *
+					    (r->strip_size_kb * 1024 / g_block_len)) *
+					   r->base_bdevs.num_base_bdevs) == pbdev->bdev.blockcnt);
+			}
 			CU_ASSERT(strcmp(pbdev->bdev.product_name, "Raid Volume") == 0);
 			CU_ASSERT(pbdev->bdev.write_cache == 0);
 			CU_ASSERT(pbdev->bdev.blocklen == g_block_len);
-			if (pbdev->num_base_bdevs > 1) {
+			if (pbdev->num_base_bdevs > 1 && pbdev->level != RAID1) {
 				CU_ASSERT(pbdev->bdev.optimal_io_boundary == pbdev->strip_size);
 				CU_ASSERT(pbdev->bdev.split_on_optimal_io_boundary == true);
 			} else {
@@ -1026,7 +1029,8 @@ create_base_bdevs(uint32_t bbdev_start_idx)
 
 static void
 create_test_req(struct rpc_bdev_raid_create *r, const char *raid_name,
-		uint8_t bbdev_start_idx, bool create_base_bdev, bool superblock)
+		uint8_t bbdev_start_idx, bool create_base_bdev, bool superblock,
+		uint8_t num_base_bdev_to_use)
 {
 	uint8_t i;
 	char name[16];
@@ -1037,8 +1041,8 @@ create_test_req(struct rpc_bdev_raid_create *r, const char *raid_name,
 	r->strip_size_kb = (g_strip_size * g_block_len) / 1024;
 	r->level = RAID0;
 	r->superblock = superblock;
-	r->base_bdevs.num_base_bdevs = g_max_base_drives;
-	for (i = 0; i < g_max_base_drives; i++, bbdev_idx++) {
+	r->base_bdevs.num_base_bdevs = num_base_bdev_to_use;
+	for (i = 0; i < num_base_bdev_to_use; i++, bbdev_idx++) {
 		snprintf(name, 16, "%s%u%s", "Nvme", bbdev_idx, "n1");
 		r->base_bdevs.base_bdevs[i] = strdup(name);
 		SPDK_CU_ASSERT_FATAL(r->base_bdevs.base_bdevs[i] != NULL);
@@ -1051,17 +1055,28 @@ create_test_req(struct rpc_bdev_raid_create *r, const char *raid_name,
 }
 
 static void
-create_raid_bdev_create_req(struct rpc_bdev_raid_create *r, const char *raid_name,
-			    uint8_t bbdev_start_idx, bool create_base_bdev,
-			    uint8_t json_decode_obj_err, bool superblock)
+_create_raid_bdev_create_req(struct rpc_bdev_raid_create *r, const char *raid_name,
+			     uint8_t bbdev_start_idx, bool create_base_bdev,
+			     uint8_t json_decode_obj_err, bool superblock,
+			     uint8_t num_base_bdev_to_use)
 {
-	create_test_req(r, raid_name, bbdev_start_idx, create_base_bdev, superblock);
+	create_test_req(r, raid_name, bbdev_start_idx, create_base_bdev, superblock,
+			num_base_bdev_to_use);
 
 	g_rpc_err = 0;
 	g_json_decode_obj_create = 1;
 	g_json_decode_obj_err = json_decode_obj_err;
 	g_config_level_create = 0;
 	g_test_multi_raids = 0;
+}
+
+static void
+create_raid_bdev_create_req(struct rpc_bdev_raid_create *r, const char *raid_name,
+			    uint8_t bbdev_start_idx, bool create_base_bdev,
+			    uint8_t json_decode_obj_err, bool superblock)
+{
+	_create_raid_bdev_create_req(r, raid_name, bbdev_start_idx, create_base_bdev,
+				     json_decode_obj_err, superblock, g_max_base_drives);
 }
 
 static void
@@ -2298,6 +2313,112 @@ test_raid_suspend_resume_create_ch(void)
 	set_thread(0);
 }
 
+static void
+test_raid_grow_base_bdev_not_supported(void)
+{
+	struct rpc_bdev_raid_create req;
+	struct rpc_bdev_raid_delete destroy_req;
+	struct raid_bdev *pbdev;
+	int rc;
+
+	set_globals();
+	CU_ASSERT(raid_bdev_init() == 0);
+
+	verify_raid_bdev_present("raid1", false);
+	create_raid_bdev_create_req(&req, "raid1", 0, true, 0, false);
+	req.level = RAID0;
+	rpc_bdev_raid_create(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+
+	TAILQ_FOREACH(pbdev, &g_raid_bdev_list, global_link) {
+		if (strcmp(pbdev->bdev.name, "raid1") == 0) {
+			break;
+		}
+	}
+	CU_ASSERT(pbdev != NULL);
+
+	/* Only RAID1 level actually support grow base bdev operation */
+	rc = raid_bdev_grow_base_bdev(pbdev, "", NULL, NULL);
+	CU_ASSERT(rc == -EPERM);
+	free_test_req(&req);
+
+	create_raid_bdev_delete_req(&destroy_req, "raid1", 0);
+	rpc_bdev_raid_delete(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev_present("raid1", false);
+
+	raid_bdev_exit();
+	base_bdevs_cleanup();
+	reset_globals();
+}
+
+static void
+grow_base_bdev_cb(void *cb_arg, int rc)
+{
+	*(int *)cb_arg = rc;
+}
+
+static void
+test_raid_grow_base_bdev(void)
+{
+	struct rpc_bdev_raid_create req;
+	struct rpc_bdev_raid_delete destroy_req;
+	struct raid_bdev *pbdev;
+	char name[16];
+	struct spdk_io_channel *ch;
+	int grow_base_bdev_cb_output;
+	int rc;
+
+	set_globals();
+	CU_ASSERT(raid_bdev_init() == 0);
+
+	snprintf(name, 16, "%s%u%s", "Nvme", g_max_base_drives - 1, "n1");
+
+	/* Create a raid with RAID1 level */
+	verify_raid_bdev_present("raid1", false);
+	_create_raid_bdev_create_req(&req, "raid1", 0, true, 0, false,
+				     g_max_base_drives - 1);
+	req.strip_size_kb = 0;
+	req.level = RAID1;
+	rpc_bdev_raid_create(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev(&req, true, RAID_BDEV_STATE_ONLINE);
+
+	TAILQ_FOREACH(pbdev, &g_raid_bdev_list, global_link) {
+		if (strcmp(pbdev->bdev.name, "raid1") == 0) {
+			break;
+		}
+	}
+	CU_ASSERT(pbdev != NULL);
+
+	/* Grow raid adding base bdev successfully */
+	ch = spdk_get_io_channel(pbdev);
+	SPDK_CU_ASSERT_FATAL(ch != NULL);
+	grow_base_bdev_cb_output = 1;
+	rc = raid_bdev_grow_base_bdev(pbdev, name, grow_base_bdev_cb,
+				      &grow_base_bdev_cb_output);
+	CU_ASSERT(rc == 0);
+
+	/* Grow base bdev with another operation running */
+	rc = raid_bdev_grow_base_bdev(pbdev, name, NULL, NULL);
+	CU_ASSERT(rc == -EBUSY);
+
+	/* Check that new base bdev has been correctly added */
+	poll_threads();
+	CU_ASSERT(grow_base_bdev_cb_output == 0);
+	spdk_put_io_channel(ch);
+	free_test_req(&req);
+
+	create_raid_bdev_delete_req(&destroy_req, "raid1", 0);
+	rpc_bdev_raid_delete(NULL, NULL);
+	CU_ASSERT(g_rpc_err == 0);
+	verify_raid_bdev_present("raid1", false);
+
+	raid_bdev_exit();
+	base_bdevs_cleanup();
+	reset_globals();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2328,6 +2449,8 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_raid_level_conversions);
 	CU_ADD_TEST(suite, test_raid_suspend_resume);
 	CU_ADD_TEST(suite, test_raid_suspend_resume_create_ch);
+	CU_ADD_TEST(suite, test_raid_grow_base_bdev_not_supported);
+	CU_ADD_TEST(suite, test_raid_grow_base_bdev);
 
 	allocate_threads(1);
 	set_thread(0);
