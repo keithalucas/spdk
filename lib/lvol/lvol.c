@@ -16,6 +16,7 @@
 #define SPDK_LVOL_BLOB_OPTS_CHANNEL_OPS 512
 
 #define LVOL_NAME "name"
+#define LVOL_CREATION_TIME "creation_time"
 
 SPDK_LOG_REGISTER_COMPONENT(lvol)
 
@@ -114,6 +115,7 @@ lvol_alloc(struct spdk_lvol_store *lvs, const char *name, bool thin_provision,
 	spdk_uuid_generate(&lvol->uuid);
 	spdk_uuid_fmt_lower(lvol->uuid_str, sizeof(lvol->uuid_str), &lvol->uuid);
 	spdk_uuid_fmt_lower(lvol->unique_id, sizeof(lvol->uuid_str), &lvol->uuid);
+	spdk_current_utc_time_rfc3339(lvol->creation_time, sizeof(lvol->creation_time));
 
 	TAILQ_INSERT_TAIL(&lvs->pending_lvols, lvol, link);
 
@@ -277,6 +279,11 @@ load_next_lvol(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 	}
 
 	snprintf(lvol->name, sizeof(lvol->name), "%s", attr);
+
+	rc = spdk_blob_get_xattr_value(blob, "creation_time", (const void **)&attr, &value_len);
+	if (rc == 0 && value_len <= SPDK_CREATION_TIME_MAX) {
+		snprintf(lvol->creation_time, sizeof(lvol->creation_time), "%s", attr);
+	}
 
 	TAILQ_INSERT_TAIL(&lvs->lvols, lvol, link);
 
@@ -1138,6 +1145,12 @@ lvol_get_xattr_value(void *xattr_ctx, const char *name,
 		*value_len = sizeof(lvol->uuid_str);
 		return;
 	}
+	if (!strcmp(LVOL_CREATION_TIME, name)) {
+		*value = lvol->creation_time;
+		*value_len = sizeof(lvol->creation_time);
+		return;
+	}
+
 	*value = NULL;
 	*value_len = 0;
 }
@@ -1183,7 +1196,7 @@ spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 	struct spdk_blob_store *bs;
 	struct spdk_lvol *lvol;
 	struct spdk_blob_opts opts;
-	char *xattr_names[] = {LVOL_NAME, "uuid"};
+	char *xattr_names[] = {LVOL_NAME, "uuid", LVOL_CREATION_TIME};
 	int rc;
 
 	if (lvs == NULL) {
@@ -1238,7 +1251,7 @@ spdk_lvol_create_esnap_clone(const void *esnap_id, uint32_t id_len, uint64_t siz
 	struct spdk_lvol *lvol;
 	struct spdk_blob_opts opts;
 	uint64_t cluster_sz;
-	char *xattr_names[] = {LVOL_NAME, "uuid"};
+	char *xattr_names[] = {LVOL_NAME, "uuid", LVOL_CREATION_TIME};
 	int rc;
 
 	if (lvs == NULL) {
@@ -1302,7 +1315,7 @@ spdk_lvol_create_snapshot(struct spdk_lvol *origlvol, const char *snapshot_name,
 	struct spdk_blob *origblob;
 	struct spdk_lvol_with_handle_req *req;
 	struct spdk_blob_xattr_opts snapshot_xattrs;
-	char *xattr_names[] = {LVOL_NAME, "uuid"};
+	char *xattr_names[] = {LVOL_NAME, "uuid", LVOL_CREATION_TIME};
 	int rc;
 
 	if (origlvol == NULL) {
@@ -1363,7 +1376,7 @@ spdk_lvol_create_clone(struct spdk_lvol *origlvol, const char *clone_name,
 	struct spdk_lvol_store *lvs;
 	struct spdk_blob *origblob;
 	struct spdk_blob_xattr_opts clone_xattrs;
-	char *xattr_names[] = {LVOL_NAME, "uuid"};
+	char *xattr_names[] = {LVOL_NAME, "uuid", LVOL_CREATION_TIME};
 	int rc;
 
 	if (origlvol == NULL) {
