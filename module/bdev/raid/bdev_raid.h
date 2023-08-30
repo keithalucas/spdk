@@ -188,6 +188,9 @@ struct raid_bdev {
 
 	/* Superblock write context */
 	void				*sb_write_ctx;
+
+	/* A flag to indicate that an operation to add a base bdev is in progress */
+	bool				base_bdev_updating;
 };
 
 #define RAID_FOR_EACH_BASE_BDEV(r, i) \
@@ -236,6 +239,8 @@ enum raid_bdev_state raid_bdev_str_to_state(const char *str);
 const char *raid_bdev_state_to_str(enum raid_bdev_state state);
 void raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ctx *w);
 int raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev);
+int raid_bdev_grow_base_bdev(struct raid_bdev *raid_bdev, char *base_bdev_name,
+			     raid_bdev_destruct_cb cb_fn, void *cb_arg);
 
 /*
  * RAID module descriptor
@@ -301,6 +306,9 @@ struct raid_bdev_module {
 	void (*resize)(struct raid_bdev *raid_bdev);
 
 	TAILQ_ENTRY(raid_bdev_module) link;
+
+	bool (*channel_grow_base_bdev)(struct raid_bdev *raid_bdev,
+				       struct raid_bdev_io_channel *raid_ch);
 };
 
 void raid_bdev_module_list_add(struct raid_bdev_module *raid_module);

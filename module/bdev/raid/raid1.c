@@ -315,6 +315,26 @@ raid1_get_io_channel(struct raid_bdev *raid_bdev)
 	return spdk_get_io_channel(r1info);
 }
 
+static bool
+channel_grow_base_bdev(struct raid_bdev *raid_bdev, struct raid_bdev_io_channel *raid_ch)
+{
+	struct raid1_io_channel *raid1_ch = spdk_io_channel_get_ctx(raid_ch->module_channel);
+	void *tmp;
+
+	tmp = realloc(raid1_ch->base_bdev_read_bw,
+		      raid_bdev->num_base_bdevs * sizeof(*raid1_ch->base_bdev_read_bw));
+	if (!tmp) {
+		SPDK_ERRLOG("Unable to reallocate raid1 channel base_bdev_modes_read_bw\n");
+		return false;
+	}
+	memset(tmp + raid_ch->num_channels * sizeof(*raid1_ch->base_bdev_read_bw), 0,
+	       sizeof(*raid1_ch->base_bdev_read_bw));
+	raid1_ch->base_bdev_read_bw = tmp;
+
+	return true;
+}
+
+
 static struct raid_bdev_module g_raid1_module = {
 	.level = RAID1,
 	.base_bdevs_min = 1,
@@ -324,6 +344,7 @@ static struct raid_bdev_module g_raid1_module = {
 	.stop = raid1_stop,
 	.submit_rw_request = raid1_submit_rw_request,
 	.get_io_channel = raid1_get_io_channel,
+	.channel_grow_base_bdev = channel_grow_base_bdev,
 };
 RAID_MODULE_REGISTER(&g_raid1_module)
 
