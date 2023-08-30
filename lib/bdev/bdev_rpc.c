@@ -635,6 +635,7 @@ rpc_dump_bdev_info(void *ctx, struct spdk_bdev *bdev)
 	struct spdk_memory_domain **domains;
 	enum spdk_bdev_io_type io_type;
 	const char *name = NULL;
+	const char *creation_time_str;
 	int i, rc;
 
 	spdk_json_write_object_begin(w);
@@ -656,6 +657,12 @@ rpc_dump_bdev_info(void *ctx, struct spdk_bdev *bdev)
 	if (bdev->numa.id_valid) {
 		spdk_json_write_named_int32(w, "numa_id", bdev->numa.id);
 	}
+
+	creation_time_str = spdk_bdev_get_creation_time(bdev);
+	if (creation_time_str == NULL) {
+		creation_time_str = "";
+	}
+	spdk_json_write_named_string(w, "creation_time", creation_time_str);
 
 	if (spdk_bdev_get_md_size(bdev) != 0) {
 		spdk_json_write_named_uint32(w, "md_size", spdk_bdev_get_md_size(bdev));
