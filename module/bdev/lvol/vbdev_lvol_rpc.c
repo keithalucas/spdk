@@ -10,6 +10,8 @@
 #include "vbdev_lvol.h"
 #include "spdk/string.h"
 #include "spdk/log.h"
+#include "spdk/bdev_module.h"
+#include "spdk/bit_array.h"
 
 SPDK_LOG_REGISTER_COMPONENT(lvol_rpc)
 
@@ -1652,3 +1654,96 @@ cleanup:
 
 SPDK_RPC_REGISTER("bdev_lvol_set_parent_bdev", rpc_bdev_lvol_set_parent_bdev,
 		  SPDK_RPC_RUNTIME)
+
+struct rpc_bdev_lvol_get_fragmap {
+	char *name;
+	uint64_t offset;
+	uint64_t size;
+};
+
+static void
+free_rpc_bdev_lvol_get_fragmap(struct rpc_bdev_lvol_get_fragmap *r)
+{
+	free(r->name);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_lvol_get_fragmap_decoders[] = {
+	{"name", offsetof(struct rpc_bdev_lvol_get_fragmap, name), spdk_json_decode_string, true},
+	{"offset", offsetof(struct rpc_bdev_lvol_get_fragmap, offset), spdk_json_decode_uint64, true},
+	{"size", offsetof(struct rpc_bdev_lvol_get_fragmap, size), spdk_json_decode_uint64, true},
+};
+
+static void
+rpc_bdev_lvol_get_fragmap_cb(void *cb_arg, struct spdk_fragmap *fragmap, int lvolerrno)
+{
+	struct spdk_json_write_ctx *w;
+	struct spdk_jsonrpc_request *request = cb_arg;
+	char *encoded;
+
+	if (lvolerrno != 0) {
+		goto invalid;
+	}
+
+	encoded = spdk_bit_array_to_base64_string(fragmap->map);
+	if (encoded == NULL) {
+		SPDK_ERRLOG("Failed to encode fragmap to base64 string\n");
+		lvolerrno = -EINVAL;
+		goto invalid;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+
+	spdk_json_write_named_uint64(w, "cluster_size", fragmap->cluster_size);
+	spdk_json_write_named_uint64(w, "num_clusters", fragmap->num_clusters);
+	spdk_json_write_named_uint64(w, "num_allocated_clusters", fragmap->num_allocated_clusters);
+	spdk_json_write_named_string(w, "fragmap", encoded);
+
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+
+	free(encoded);
+	return;
+
+invalid:
+	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+					 spdk_strerror(-lvolerrno));
+}
+
+static void
+rpc_bdev_lvol_get_fragmap(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
+{
+	struct rpc_bdev_lvol_get_fragmap req = {};
+	struct spdk_bdev *bdev;
+	struct spdk_lvol *lvol;
+
+	if (spdk_json_decode_object(params, rpc_bdev_lvol_get_fragmap_decoders,
+				    SPDK_COUNTOF(rpc_bdev_lvol_get_fragmap_decoders),
+				    &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(req.name);
+	if (bdev == NULL) {
+		SPDK_ERRLOG("bdev '%s' does not exist\n", req.name);
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	lvol = vbdev_lvol_get_from_bdev(bdev);
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	vbdev_lvol_get_fragmap(lvol, req.offset, req.size, rpc_bdev_lvol_get_fragmap_cb, request);
+
+cleanup:
+	free_rpc_bdev_lvol_get_fragmap(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_get_fragmap", rpc_bdev_lvol_get_fragmap, SPDK_RPC_RUNTIME)

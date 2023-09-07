@@ -123,6 +123,30 @@ struct spdk_lvol {
 	TAILQ_ENTRY(spdk_lvol)		degraded_link;
 };
 
+struct spdk_fragmap {
+	struct spdk_bit_array *map;
+
+	uint64_t cluster_size;
+	uint64_t block_size;
+	uint64_t num_clusters;
+	uint64_t num_allocated_clusters;
+};
+
+struct spdk_fragmap_req {
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *bdev_desc;
+	struct spdk_io_channel *bdev_io_channel;
+
+	struct spdk_fragmap fragmap;
+
+	uint64_t offset;
+	uint64_t size;
+	uint64_t current_offset;
+
+	spdk_lvol_op_with_fragmap_handle_complete cb_fn;
+	void *cb_arg;
+};
+
 struct lvol_store_bdev *vbdev_lvol_store_first(void);
 struct lvol_store_bdev *vbdev_lvol_store_next(struct lvol_store_bdev *prev);
 

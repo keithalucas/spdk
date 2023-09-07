@@ -22,6 +22,7 @@ extern "C" {
 struct spdk_bs_dev;
 struct spdk_lvol_store;
 struct spdk_lvol;
+struct spdk_fragmap;
 
 enum lvol_clear_method {
 	LVOL_CLEAR_WITH_DEFAULT = BLOB_CLEAR_WITH_DEFAULT,
@@ -115,6 +116,16 @@ typedef void (*spdk_lvol_op_with_handle_complete)(void *cb_arg, struct spdk_lvol
  * \param lvolerrno Error
  */
 typedef void (*spdk_lvol_op_complete)(void *cb_arg, int lvolerrno);
+
+/**
+ * Callback definition for lvol operations with handle to fragmap
+ *
+ * @param cb_arg Custom arguments
+ * @param fragmap Handle to fragmap or NULL when lvolerrno is set
+ * @param lvolerrno Error
+ */
+typedef void (*spdk_lvol_op_with_fragmap_handle_complete)(void *cb_arg,
+		struct spdk_fragmap *fragmap, int lvolerrno);
 
 /**
  * Callback definition for spdk_lvol_iter_clones.
