@@ -143,4 +143,16 @@ int vbdev_lvol_shallow_copy(struct spdk_lvol *lvol, const char *bdev_name,
 void vbdev_lvol_set_external_parent(struct spdk_lvol *lvol, const char *esnap_name,
 				    spdk_lvol_op_complete cb_fn, void *cb_arg);
 
+/**
+ * @brief Get a fragmap for a specific segment of a logical volume using the provided offset and size
+ *
+ * @param lvol Handle to lvol
+ * @param offset Offset in bytes of the specific segment of the logical volume
+ * @param size Size in bytes of the specific segment of the logical volume
+ * @param cb_fn Completion callback
+ * @param cb_arg Completion callback custom arguments
+ */
+void vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
+			    spdk_lvol_op_with_fragmap_handle_complete cb_fn, void *cb_arg);
+
 #endif /* SPDK_VBDEV_LVOL_H */

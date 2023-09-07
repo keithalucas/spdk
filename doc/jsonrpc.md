@@ -502,6 +502,7 @@ Example response:
     "bdev_lvol_check_shallow_copy",
     "bdev_lvol_set_parent",
     "bdev_lvol_set_parent_bdev",
+    "bdev_lvol_get_fragmap",
     "bdev_daos_delete",
     "bdev_daos_create",
     "bdev_daos_resize"
@@ -10823,6 +10824,52 @@ Example response:
     "state": "in progress",
     "copied_clusters": 2,
     "total_clusters": 4
+  }
+}
+~~~
+
+### bdev_lvol_get_fragmap {#bdev_lvol_get_fragmap}
+
+Get a fragmap for a specific segment of a logical volume using the provided offset and size.
+A fragmap is a bitmap that records the allocation status of clusters. A value of "1" indicates
+that a cluster is allocated, whereas "0" signifies that a cluster is unallocated.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of the logical volume
+offset                  | Optional | number      | Offset in bytes of the specific segment of the logical volume (Default: 0)
+size                    | Optional | number      | Size in bytes of the specific segment of the logical volume (Default: 0 for representing the entire file)
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_get_fragmap",
+  "id": 1,
+  "params": {
+    "name": "8a47421a-20cf-444f-845c-d97ad0b0bd8e",
+    "offset": 0,
+    "size": 41943040
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "cluster_size": 4194304,
+    "num_clusters": 10,
+    "num_allocated_clusters": 0,
+    "fragmap": "AAA="
   }
 }
 ~~~
