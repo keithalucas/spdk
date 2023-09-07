@@ -10,6 +10,8 @@
 #include "spdk/string.h"
 #include "spdk/uuid.h"
 #include "spdk/blob.h"
+#include "spdk/bit_array.h"
+#include "spdk/base64.h"
 
 #include "vbdev_lvol.h"
 
@@ -1996,6 +1998,191 @@ vbdev_lvol_shallow_copy(struct spdk_lvol *lvol, const char *bdev_name,
 	req->ext_dev = ext_dev;
 
 	spdk_lvol_shallow_copy(lvol, ext_dev, _vbdev_lvol_shallow_copy_cb, req);
+}
+
+static void seek_hole_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg);
+
+static void
+get_fragmap_done(struct spdk_fragmap_req *req, int error_code, const char *error_msg)
+{
+	req->cb_fn(req->cb_arg, &req->fragmap, error_code);
+
+	spdk_bit_array_free(&req->fragmap.map);
+	spdk_put_io_channel(req->bdev_io_channel);
+	spdk_bdev_close(req->bdev_desc);
+	free(req);
+}
+
+static void
+seek_data_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct spdk_fragmap_req *req = cb_arg;
+	uint64_t next_data_offset_blocks;
+	int rc;
+
+	next_data_offset_blocks = spdk_bdev_io_get_seek_offset(bdev_io);
+	spdk_bdev_free_io(bdev_io);
+
+	req->current_offset = next_data_offset_blocks * req->fragmap.block_size;
+
+	if (next_data_offset_blocks == UINT64_MAX || req->current_offset >= req->offset + req->size) {
+		get_fragmap_done(req, 0, NULL);
+		return;
+	}
+
+	rc = spdk_bdev_seek_hole(req->bdev_desc, req->bdev_io_channel,
+				 spdk_divide_round_up(req->current_offset, req->fragmap.block_size),
+				 seek_hole_done_cb, req);
+	if (rc != 0) {
+		get_fragmap_done(req, rc, "failed to seek hole");
+	}
+}
+
+static void
+seek_hole_done_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct spdk_fragmap_req *req = cb_arg;
+	uint64_t next_offset;
+	uint64_t start_cluster;
+	uint64_t num_clusters;
+	int rc;
+
+	next_offset = spdk_bdev_io_get_seek_offset(bdev_io) * req->fragmap.block_size;
+	spdk_bdev_free_io(bdev_io);
+
+	next_offset = spdk_min(next_offset, req->offset + req->size);
+
+	start_cluster = spdk_divide_round_up(req->current_offset - req->offset, req->fragmap.cluster_size);
+	num_clusters = spdk_divide_round_up(next_offset - req->current_offset, req->fragmap.cluster_size);
+
+	for (uint64_t i = 0; i < num_clusters; i++) {
+		spdk_bit_array_set(req->fragmap.map, start_cluster + i);
+	}
+	req->fragmap.num_allocated_clusters += num_clusters;
+
+	req->current_offset = next_offset;
+
+	if (req->current_offset == req->offset + req->size) {
+		get_fragmap_done(req, 0, NULL);
+		return;
+	}
+
+	rc = spdk_bdev_seek_data(req->bdev_desc, req->bdev_io_channel,
+				 spdk_divide_round_up(req->current_offset, req->fragmap.block_size),
+				 seek_data_done_cb, req);
+	if (rc != 0) {
+		get_fragmap_done(req, rc, "failed to seek data");
+	}
+}
+
+static void
+dummy_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *ctx)
+{
+}
+
+void
+vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
+		       spdk_lvol_op_with_fragmap_handle_complete cb_fn, void *cb_arg)
+{
+	struct spdk_bdev_desc *desc;
+	struct spdk_io_channel *channel;
+	struct spdk_bit_array *fragmap;
+	struct spdk_fragmap_req *req;
+	uint64_t cluster_size, num_clusters, block_size, num_blocks, lvol_size, segment_size;
+	int rc;
+
+	/*
+	 * Create a bitmap recording the allocated clusters
+	 */
+	cluster_size = spdk_bs_get_cluster_size(lvol->lvol_store->blobstore);
+	block_size = spdk_bdev_get_block_size(lvol->bdev);
+	num_blocks = spdk_bdev_get_num_blocks(lvol->bdev);
+	lvol_size = num_blocks * block_size;
+
+	if (offset + size > lvol_size) {
+		SPDK_ERRLOG("offset %lu and size %lu exceed lvol size %lu\n",
+			    offset, size, lvol_size);
+		cb_fn(cb_arg, NULL, -EINVAL);
+		return;
+	}
+
+	segment_size = size;
+	if (size == 0) {
+		segment_size = lvol_size;
+	}
+
+	if (!spdk_is_divisible_by(offset, cluster_size) ||
+	    !spdk_is_divisible_by(segment_size, cluster_size)) {
+		SPDK_ERRLOG("offset %lu and size %lu must be a multiple of cluster size %lu\n",
+			    offset, segment_size, cluster_size);
+		cb_fn(cb_arg, NULL, -EINVAL);
+		return;
+	}
+
+	num_clusters = spdk_divide_round_up(segment_size, cluster_size);
+	fragmap = spdk_bit_array_create(num_clusters);
+	if (fragmap == NULL) {
+		SPDK_ERRLOG("failed to allocate fragmap with num_clusters %lu\n", num_clusters);
+		cb_fn(cb_arg, NULL, -ENOMEM);
+		return;
+	}
+
+	/*
+	 * Construct a fragmap of the lvol
+	 */
+	rc = spdk_bdev_open_ext(lvol->bdev->name, false,
+				dummy_bdev_event_cb, NULL, &desc);
+	if (rc != 0) {
+		spdk_bit_array_free(&fragmap);
+		SPDK_ERRLOG("could not open bdev %s\n", lvol->bdev->name);
+		cb_fn(cb_arg, NULL, rc);
+		return;
+	}
+
+	channel = spdk_bdev_get_io_channel(desc);
+	if (channel == NULL) {
+		spdk_bit_array_free(&fragmap);
+		spdk_bdev_close(desc);
+		SPDK_ERRLOG("could not allocate I/O channel.\n");
+		cb_fn(cb_arg, NULL, -ENOMEM);
+		return;
+	}
+
+	req = calloc(1, sizeof(struct spdk_fragmap_req));
+	if (req == NULL) {
+		SPDK_ERRLOG("could not allocate fragmap_io\n");
+		spdk_put_io_channel(channel);
+		spdk_bdev_close(desc);
+		spdk_bit_array_free(&fragmap);
+		cb_fn(cb_arg, NULL, -ENOMEM);
+		return;
+	}
+
+	req->bdev = lvol->bdev;
+	req->bdev_desc = desc;
+	req->bdev_io_channel = channel;
+	req->offset = offset;
+	req->size = segment_size;
+	req->current_offset = offset;
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+	req->fragmap.map = fragmap;
+	req->fragmap.num_clusters = num_clusters;
+	req->fragmap.block_size = block_size;
+	req->fragmap.cluster_size = cluster_size;
+	req->fragmap.num_allocated_clusters = 0;
+
+	rc = spdk_bdev_seek_data(desc, channel,
+				 spdk_divide_round_up(offset, block_size),
+				 seek_data_done_cb, req);
+	if (rc != 0) {
+		SPDK_ERRLOG("failed to seek data\n");
+		spdk_put_io_channel(channel);
+		spdk_bdev_close(desc);
+		spdk_bit_array_free(&fragmap);
+		free(req);
+		cb_fn(cb_arg, NULL, rc);
+	}
 }
 
 SPDK_LOG_REGISTER_COMPONENT(vbdev_lvol)

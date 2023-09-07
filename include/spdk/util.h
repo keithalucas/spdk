@@ -346,6 +346,20 @@ spdk_memset_s(void *data, size_t data_size, int ch, size_t count)
 #endif
 }
 
+/**
+ * @brief Check if \b dividend is divisible by \b divisor
+ *
+ * @param dividend Dividend
+ * @param divisor Divisor which is a power of 2
+ * @return true
+ * @return false
+ */
+static inline bool
+spdk_is_divisible_by(uint64_t dividend, uint64_t divisor)
+{
+	return (dividend & (divisor - 1)) == 0;
+}
+
 #ifdef __cplusplus
 }
 #endif
