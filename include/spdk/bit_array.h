@@ -168,6 +168,14 @@ void spdk_bit_array_load_mask(struct spdk_bit_array *ba, const void *mask);
  */
 void spdk_bit_array_clear_mask(struct spdk_bit_array *ba);
 
+/**
+ * Encode a bit array into a base64 string.
+ *
+ * @param array Bit array to encode.
+ * @return base64 string.
+ */
+char *spdk_bit_array_to_base64_string(const struct spdk_bit_array *array);
+
 #ifdef __cplusplus
 }
 #endif
