@@ -21,6 +21,7 @@ run_test "lvol_provisioning" $rootdir/test/lvol/thin_provisioning.sh
 run_test "lvol_esnap" $rootdir/test/lvol/esnap/esnap
 run_test "lvol_external_snapshot" $rootdir/test/lvol/external_snapshot.sh
 run_test "lvol_external_copy" $rootdir/test/lvol/external_copy.sh
+run_test "lvol_fragmap" $rootdir/test/lvol/fragmap.sh
 timing_exit basic
 
 timing_exit lvol
