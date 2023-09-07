@@ -11,6 +11,7 @@
 
 #include "spdk/likely.h"
 #include "spdk/util.h"
+#include "spdk/base64.h"
 
 typedef uint64_t spdk_bit_array_word;
 #define SPDK_BIT_ARRAY_WORD_TZCNT(x)	(__builtin_ctzll(x))
@@ -490,4 +491,50 @@ spdk_bit_pool_free_all_bits(struct spdk_bit_pool *pool)
 	spdk_bit_array_clear_mask(pool->array);
 	pool->lowest_free_bit = 0;
 	pool->free_count = spdk_bit_array_capacity(pool->array);
+}
+
+static int
+bits_to_bytes(const int bits)
+{
+	return ((bits + 7) >> 3);
+}
+
+char *
+spdk_bit_array_to_base64_string(const struct spdk_bit_array *array)
+{
+	uint32_t bit_count = spdk_bit_array_capacity(array);
+	size_t byte_count = bits_to_bytes(bit_count);
+	void *bytes;
+	char *encoded;
+	size_t total_size;
+	int rc;
+
+	bytes = calloc(byte_count, sizeof(char));
+	if (bytes == NULL) {
+		return NULL;
+	}
+
+	for (uint32_t i = 0; i < bit_count; i++) {
+		if (spdk_bit_array_get(array, i)) {
+			// Set the bit in bytes's correct position
+			((uint8_t *)bytes)[i / 8] |= 1 << (i % 8);
+		}
+	}
+
+	total_size = spdk_base64_get_encoded_strlen(byte_count) + 1;
+	encoded = calloc(total_size, sizeof(char));
+	if (encoded == NULL) {
+		free(bytes);
+		return NULL;
+	}
+
+	rc = spdk_base64_encode(encoded, bytes, byte_count);
+	if (rc != 0) {
+		free(bytes);
+		free(encoded);
+		return NULL;
+	}
+
+	free(bytes);
+	return encoded;
 }
