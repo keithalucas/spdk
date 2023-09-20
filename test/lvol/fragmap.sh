@@ -208,7 +208,7 @@ modprobe nbd
 run_test "test_fragmap_empty_lvol" test_fragmap_empty_lvol
 run_test "test_fragmap_data_hole" test_fragmap_data_hole
 run_test "test_fragmap_hole_data" test_fragmap_hole_data
-rrun_test "test_fragmap_hole_data_hole" test_fragmap_hole_data_hole
+run_test "test_fragmap_hole_data_hole" test_fragmap_hole_data_hole
 run_test "test_fragmap_data_hole_data" test_fragmap_data_hole_data
 
 trap - SIGINT SIGTERM EXIT
