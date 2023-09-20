@@ -26,6 +26,7 @@ struct lvol_store_bdev *g_lvs_bdev = NULL;
 struct spdk_bdev *g_base_bdev = NULL;
 struct spdk_bdev_io *g_io = NULL;
 struct spdk_io_channel *g_ch = NULL;
+struct spdk_io_channel *g_bs_ch = NULL;
 
 static struct spdk_bdev g_bdev = {};
 static struct spdk_lvol_store *g_lvol_store = NULL;
@@ -54,6 +55,7 @@ DEFINE_STUB(spdk_lvs_esnap_missing_add, int,
 	     uint32_t id_len), -ENOTSUP);
 DEFINE_STUB(spdk_blob_get_esnap_bs_dev, struct spdk_bs_dev *, (const struct spdk_blob *blob), NULL);
 DEFINE_STUB(spdk_lvol_is_degraded, bool, (const struct spdk_lvol *lvol), false);
+DEFINE_STUB_V(spdk_bs_free_io_channel, (struct spdk_io_channel *channel));
 DEFINE_STUB(spdk_blob_get_num_allocated_clusters, uint64_t, (struct spdk_blob *blob), 0);
 
 struct spdk_blob {
@@ -678,7 +680,7 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 struct spdk_io_channel *spdk_lvol_get_io_channel(struct spdk_lvol *lvol)
 {
 	CU_ASSERT(lvol == g_lvol);
-	return g_ch;
+	return g_bs_ch;
 }
 
 void
@@ -958,6 +960,13 @@ static void
 vbdev_lvol_shallow_copy_complete(void *cb_arg, int lvolerrno)
 {
 	g_lvolerrno = lvolerrno;
+}
+
+static struct spdk_io_channel *
+_vbdev_lvol_get_io_channel(void *ctx)
+{
+	g_ch = spdk_get_io_channel(ctx);
+	return g_ch;
 }
 
 static void
@@ -1596,15 +1605,46 @@ ut_lvs_init(void)
 static void
 ut_vbdev_lvol_get_io_channel(void)
 {
+	struct spdk_lvol_store *lvs;
 	struct spdk_io_channel *ch;
+	struct spdk_lvol_channel *lvol_ch;
+	int sz = 10;
+	int rc;
 
-	g_lvol = calloc(1, sizeof(struct spdk_lvol));
-	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
+	/* Create lvol store */
+	rc = vbdev_lvs_create("bdev", "lvs", 0, LVS_CLEAR_WITH_UNMAP, 0,
+			      lvol_store_op_with_handle_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol_store != NULL);
+	CU_ASSERT(g_lvol_store->bs_dev != NULL);
+	lvs = g_lvol_store;
 
-	ch = vbdev_lvol_get_io_channel(g_lvol);
-	CU_ASSERT(ch == g_ch);
+	/* Create lvol */
+	g_lvolerrno = -1;
+	rc = vbdev_lvol_create(lvs, "lvol", sz, false, LVOL_CLEAR_WITH_DEFAULT, vbdev_lvol_create_complete,
+			       NULL);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	CU_ASSERT(g_lvol != NULL);
+	CU_ASSERT(g_lvolerrno == 0);
 
-	free(g_lvol);
+	/* Get io channel */
+	ch = _vbdev_lvol_get_io_channel(g_lvol);
+	CU_ASSERT(ch != NULL);
+	lvol_ch = (struct spdk_lvol_channel *)spdk_io_channel_get_ctx(ch);
+	CU_ASSERT(lvol_ch->bs_channel == g_bs_ch);
+
+	/* Release io channel */
+	spdk_put_io_channel(ch);
+
+	/* Destroy lvol */
+	vbdev_lvol_destroy(g_lvol, lvol_store_op_complete, NULL);
+	CU_ASSERT(g_lvol == NULL);
+
+	/* Destroy lvol store */
+	vbdev_lvs_destruct(lvs, lvol_store_op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	CU_ASSERT(g_lvol_store == NULL);
 }
 
 static void

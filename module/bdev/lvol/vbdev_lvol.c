@@ -15,6 +15,11 @@
 
 #include "vbdev_lvol.h"
 
+struct spdk_lvol_channel {
+	/* The channel for the underlying blobstore device */
+	struct spdk_io_channel	*bs_channel;
+};
+
 struct vbdev_lvol_io {
 	struct spdk_blob_ext_io_opts ext_io_opts;
 };
@@ -117,6 +122,49 @@ _vbdev_lvol_change_bdev_alias(struct spdk_lvol *lvol, const char *new_lvol_name)
 	}
 
 	return 0;
+}
+
+static int
+vbdev_lvol_channel_create(void *io_device, void *ctx_buf)
+{
+	struct spdk_lvol		*lvol = io_device;
+	struct spdk_lvol_channel	*channel = ctx_buf;
+
+	channel->bs_channel = spdk_lvol_get_io_channel(lvol);
+
+	return 0;
+}
+
+static void
+vbdev_lvol_channel_destroy(void *io_device, void *ctx_buf)
+{
+	struct spdk_lvol_channel *channel = ctx_buf;
+
+	spdk_bs_free_io_channel(channel->bs_channel);
+}
+
+static int
+vbdev_lvol_register(struct spdk_lvol *lvol, struct spdk_bdev *lvol_bdev)
+{
+	int rc;
+
+	/* We must register lvol as io_device before to register lvol bdev */
+	spdk_io_device_register(lvol, vbdev_lvol_channel_create, vbdev_lvol_channel_destroy,
+				sizeof(struct spdk_lvol_channel), "lvol");
+
+	rc = spdk_bdev_register(lvol_bdev);
+	if (rc) {
+		spdk_io_device_unregister(lvol, NULL);
+	}
+
+	return rc;
+}
+
+static void
+vbdev_lvol_unregister(struct spdk_lvol *lvol, spdk_bdev_unregister_cb cb_fn, void *cb_arg)
+{
+	spdk_io_device_unregister(lvol, NULL);
+	spdk_bdev_unregister(lvol->bdev, cb_fn, cb_arg);
 }
 
 static struct lvol_store_bdev *
@@ -555,7 +603,7 @@ struct vbdev_lvol_destroy_ctx {
 };
 
 static void
-_vbdev_lvol_unregister_unload_lvs(void *cb_arg, int lvserrno)
+_vbdev_lvol_destruct_unload_lvs(void *cb_arg, int lvserrno)
 {
 	struct lvol_bdev *lvol_bdev = cb_arg;
 	struct lvol_store_bdev *lvs_bdev = lvol_bdev->lvs_bdev;
@@ -572,13 +620,15 @@ _vbdev_lvol_unregister_unload_lvs(void *cb_arg, int lvserrno)
 }
 
 static void
-_vbdev_lvol_unregister_cb(void *ctx, int lvolerrno)
+_vbdev_lvol_destruct_cb(void *ctx, int lvolerrno)
 {
 	struct lvol_bdev *lvol_bdev = ctx;
 	struct lvol_store_bdev *lvs_bdev = lvol_bdev->lvs_bdev;
 
+	spdk_io_device_unregister(lvol_bdev->lvol, NULL);
+
 	if (g_shutdown_started && _vbdev_lvs_are_lvols_closed(lvs_bdev->lvs)) {
-		spdk_lvs_unload(lvs_bdev->lvs, _vbdev_lvol_unregister_unload_lvs, lvol_bdev);
+		spdk_lvs_unload(lvs_bdev->lvs, _vbdev_lvol_destruct_unload_lvs, lvol_bdev);
 		return;
 	}
 
@@ -587,7 +637,7 @@ _vbdev_lvol_unregister_cb(void *ctx, int lvolerrno)
 }
 
 static int
-vbdev_lvol_unregister(void *ctx)
+vbdev_lvol_destruct(void *ctx)
 {
 	struct spdk_lvol *lvol = ctx;
 	struct lvol_bdev *lvol_bdev;
@@ -596,7 +646,7 @@ vbdev_lvol_unregister(void *ctx)
 	lvol_bdev = SPDK_CONTAINEROF(lvol->bdev, struct lvol_bdev, bdev);
 
 	spdk_bdev_alias_del_all(lvol->bdev);
-	spdk_lvol_close(lvol, _vbdev_lvol_unregister_cb, lvol_bdev);
+	spdk_lvol_close(lvol, _vbdev_lvol_destruct_cb, lvol_bdev);
 
 	/* return 1 to indicate we have an operation that must finish asynchronously before the
 	 *  lvol is closed
@@ -810,9 +860,7 @@ vbdev_lvol_write_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx 
 static struct spdk_io_channel *
 vbdev_lvol_get_io_channel(void *ctx)
 {
-	struct spdk_lvol *lvol = ctx;
-
-	return spdk_lvol_get_io_channel(lvol);
+	return spdk_get_io_channel(ctx);
 }
 
 static bool
@@ -942,18 +990,21 @@ lvol_reset(struct spdk_bdev_io *bdev_io)
 static void
 lvol_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io, bool success)
 {
+	struct spdk_lvol_channel *lvol_ch = (struct spdk_lvol_channel *)spdk_io_channel_get_ctx(ch);
+
 	if (!success) {
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 		return;
 	}
 
-	lvol_read(ch, bdev_io);
+	lvol_read(lvol_ch->bs_channel, bdev_io);
 }
 
 static void
 vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	struct spdk_lvol *lvol = bdev_io->bdev->ctxt;
+	struct spdk_lvol_channel *lvol_ch = (struct spdk_lvol_channel *)spdk_io_channel_get_ctx(ch);
 
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
@@ -961,16 +1012,16 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_
 				     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
-		lvol_write(lvol, ch, bdev_io);
+		lvol_write(lvol, lvol_ch->bs_channel, bdev_io);
 		break;
 	case SPDK_BDEV_IO_TYPE_RESET:
 		lvol_reset(bdev_io);
 		break;
 	case SPDK_BDEV_IO_TYPE_UNMAP:
-		lvol_unmap(lvol, ch, bdev_io);
+		lvol_unmap(lvol, lvol_ch->bs_channel, bdev_io);
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
-		lvol_write_zeroes(lvol, ch, bdev_io);
+		lvol_write_zeroes(lvol, lvol_ch->bs_channel, bdev_io);
 		break;
 	case SPDK_BDEV_IO_TYPE_SEEK_DATA:
 		lvol_seek_data(lvol, bdev_io);
@@ -1060,7 +1111,7 @@ vbdev_lvol_get_memory_domains(void *ctx, struct spdk_memory_domain **domains, in
 }
 
 static struct spdk_bdev_fn_table vbdev_lvol_fn_table = {
-	.destruct		= vbdev_lvol_unregister,
+	.destruct		= vbdev_lvol_destruct,
 	.io_type_supported	= vbdev_lvol_io_type_supported,
 	.submit_request		= vbdev_lvol_submit_request,
 	.get_io_channel		= vbdev_lvol_get_io_channel,
@@ -1160,7 +1211,7 @@ _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
 	 * bdev that may be used by multiple lvols. */
 	bdev->reset_io_drain_timeout = SPDK_BDEV_RESET_IO_DRAIN_RECOMMENDED_VALUE;
 
-	rc = spdk_bdev_register(bdev);
+	rc = vbdev_lvol_register(lvol, bdev);
 	if (rc) {
 		free(lvol_bdev);
 		return rc;
@@ -1170,16 +1221,16 @@ _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
 	alias = spdk_sprintf_alloc("%s/%s", lvs_bdev->lvs->name, lvol->name);
 	if (alias == NULL) {
 		SPDK_ERRLOG("Cannot alloc memory for alias\n");
-		spdk_bdev_unregister(lvol->bdev, (destroy ? _create_lvol_disk_destroy_cb :
-						  _create_lvol_disk_unload_cb), lvol);
+		vbdev_lvol_unregister(lvol, (destroy ? _create_lvol_disk_destroy_cb :
+					     _create_lvol_disk_unload_cb), lvol);
 		return -ENOMEM;
 	}
 
 	rc = spdk_bdev_alias_add(bdev, alias);
 	if (rc != 0) {
 		SPDK_ERRLOG("Cannot add alias to lvol bdev\n");
-		spdk_bdev_unregister(lvol->bdev, (destroy ? _create_lvol_disk_destroy_cb :
-						  _create_lvol_disk_unload_cb), lvol);
+		vbdev_lvol_unregister(lvol, (destroy ? _create_lvol_disk_destroy_cb :
+					     _create_lvol_disk_unload_cb), lvol);
 	}
 	free(alias);
 
