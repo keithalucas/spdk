@@ -496,6 +496,8 @@ Example response:
     "bdev_lvol_rename_lvstore",
     "bdev_lvol_create_lvstore",
     "bdev_lvol_shallow_copy",
+    "bdev_lvol_set_xattr",
+    "bdev_lvol_get_xattr",
     "bdev_lvol_get_fragmap",
     "bdev_daos_delete",
     "bdev_daos_create",
@@ -10015,6 +10017,29 @@ Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 src_lvol_name           | Required | string      | UUID or alias of lvol to create a copy from
 dst_bdev_name           | Required | string      | Name of the bdev that acts as destination for the copy
+
+### bdev_lvol_set_xattr {#rpc_bdev_lvol_set_xattr}
+
+Set xattr for lvol bdev
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of lvol
+xattr_name              | Required | string      | Name of the xattr
+xattr_value             | Required | string      | Value of the xattr
+
+### bdev_lvol_get_xattr {#rpc_bdev_lvol_get_xattr}
+
+Get xattr for lvol bdev
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of lvol
+xattr_name              | Required | string      | Name of the xattr
+
+
 
 #### Example
 

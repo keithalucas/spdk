@@ -2218,7 +2218,9 @@ vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
 	uint64_t cluster_size, num_clusters, block_size, num_blocks, lvol_size, segment_size;
 	int rc;
 
-	// Create a bitmap recording the allocated clusters
+	/*
+	 * Create a bitmap recording the allocated clusters
+	 */
 	cluster_size = spdk_bs_get_cluster_size(lvol->lvol_store->blobstore);
 	block_size = spdk_bdev_get_block_size(lvol->bdev);
 	num_blocks = spdk_bdev_get_num_blocks(lvol->bdev);
@@ -2252,7 +2254,9 @@ vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
 		return;
 	}
 
-	// Construct a fragmap of the lvol
+	/*
+	 * Construct a fragmap of the lvol
+	 */
 	rc = spdk_bdev_open_ext(lvol->bdev->name, false,
 				dummy_bdev_event_cb, NULL, &desc);
 	if (rc != 0) {

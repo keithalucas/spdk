@@ -740,7 +740,7 @@ invalid:
 
 static void
 rpc_bdev_lvol_set_xattr(struct spdk_jsonrpc_request *request,
-		     const struct spdk_json_val *params)
+			const struct spdk_json_val *params)
 {
 	struct rpc_bdev_lvol_set_xattr req = {};
 	struct spdk_bdev *bdev;

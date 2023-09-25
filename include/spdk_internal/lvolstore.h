@@ -109,7 +109,7 @@ struct spdk_lvol {
 	char				name[SPDK_LVOL_NAME_MAX];
 	struct spdk_uuid		uuid;
 	char				uuid_str[SPDK_UUID_STRING_LEN];
-	char 				creation_time[SPDK_CREATION_TIME_MAX];
+	char				creation_time[SPDK_CREATION_TIME_MAX];
 	struct spdk_bdev		*bdev;
 	int				ref_count;
 	bool				action_in_progress;
