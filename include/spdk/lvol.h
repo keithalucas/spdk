@@ -119,7 +119,7 @@ typedef void (*spdk_lvol_op_complete)(void *cb_arg, int lvolerrno);
 
 /**
  * Callback definition for lvol operations with handle to fragmap
- * 
+ *
  * @param cb_arg Custom arguments
  * @param fragmap Handle to fragmap or NULL when lvolerrno is set
  * @param lvolerrno Error

@@ -197,4 +197,12 @@ bdev_lvol_decouple_parent [-h] name
     Decouple parent of a logical volume
     optional arguments:
     -h, --help  show help
+bdev_lvol_set_xattr [-h] name xattr_name xattr_value
+    Set xattr for lvol bdev
+    optional arguments:
+    -h, --help  show help
+bdev_lvol_get_xattr [-h] name xattr_name
+    Get xattr for lvol bdev
+    optional arguments:
+    -h, --help  show help
 ```

@@ -324,14 +324,15 @@ spdk_is_divisible_by(uint64_t dividend, uint64_t divisor)
 
 /*
  * Get the UTC time string in RFC3339 format.
- * 
+ *
  * \param buf Buffer to store the UTC time string.
  * \param buf_size Size of the buffer.
- * 
+ *
  * \return void
  */
 static inline void
-spdk_current_utc_time_rfc3339(char *buf, size_t buf_size) {
+spdk_current_utc_time_rfc3339(char *buf, size_t buf_size)
+{
 	struct tm *utc;
 	time_t rawtime;
 

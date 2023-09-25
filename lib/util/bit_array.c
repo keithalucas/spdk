@@ -516,7 +516,9 @@ spdk_bit_array_to_base64_string(const struct spdk_bit_array *array)
 
 	for (uint32_t i = 0; i < bit_count; i++) {
 		if (spdk_bit_array_get(array, i)) {
-			// Set the bit in bytes's correct position
+			/*
+			 * Set the bit in bytes's correct position
+			 */
 			((uint8_t *)bytes)[i / 8] |= 1 << (i % 8);
 		}
 	}

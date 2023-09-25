@@ -515,7 +515,7 @@ struct spdk_bdev {
 
 	/**
 	 * Creation time for this bdev.
-	 * 
+	 *
 	 * If not provided, it will be NULL.
 	 */
 	const char *creation_time;

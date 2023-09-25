@@ -88,7 +88,7 @@ void vbdev_lvol_set_xattr(struct spdk_lvol *lvol, const char *name,
  * \param value_len Xattr value length
  */
 int vbdev_lvol_get_xattr(struct spdk_lvol *lvol, const char *name,
-						 const void **value, size_t *value_len);
+			 const void **value, size_t *value_len);
 
 /**
  * Destroy a logical volume
@@ -166,8 +166,7 @@ void vbdev_lvol_shallow_copy(struct spdk_lvol *lvol, const char *bdev_name,
  * @param cb_fn Completion callback
  * @param cb_arg Completion callback custom arguments
  */
-void
-vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
-		      spdk_lvol_op_with_fragmap_handle_complete cb_fn, void *cb_arg);
+void vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
+			    spdk_lvol_op_with_fragmap_handle_complete cb_fn, void *cb_arg);
 
 #endif /* SPDK_VBDEV_LVOL_H */
