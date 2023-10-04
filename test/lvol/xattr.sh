@@ -15,10 +15,10 @@ function is_rfc3339_formatted() {
 	# Check if the input string matches the pattern
 	if [[ $1 =~ $rfc3339_pattern ]]; then
 		echo "The time string '$1' is in RFC3339 format."
-		return 0  # Success
+		return 0 # Success
 	else
 		echo "The time string '$1' is not in RFC3339 format."
-		return 1  # Failure
+		return 1 # Failure
 	fi
 }
 

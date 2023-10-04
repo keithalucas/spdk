@@ -10021,6 +10021,7 @@ dst_bdev_name           | Required | string      | Name of the bdev that acts as
 ### bdev_lvol_set_xattr {#rpc_bdev_lvol_set_xattr}
 
 Set xattr for lvol bdev
+
 #### Parameters
 
 Name                    | Optional | Type        | Description
@@ -10032,14 +10033,13 @@ xattr_value             | Required | string      | Value of the xattr
 ### bdev_lvol_get_xattr {#rpc_bdev_lvol_get_xattr}
 
 Get xattr for lvol bdev
+
 #### Parameters
 
 Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 name                    | Required | string      | UUID or alias of lvol
 xattr_name              | Required | string      | Name of the xattr
-
-
 
 #### Example
 
