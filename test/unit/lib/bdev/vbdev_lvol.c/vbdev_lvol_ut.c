@@ -687,6 +687,7 @@ void
 spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, uint64_t len)
 {
 	CU_ASSERT(cb == lvol_get_buf_cb);
+	cb(g_ch, bdev_io, true);
 }
 
 void
@@ -695,7 +696,7 @@ spdk_blob_io_read(struct spdk_blob *blob, struct spdk_io_channel *channel,
 		  spdk_blob_op_complete cb_fn, void *cb_arg)
 {
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	cb_fn(cb_arg, 0);
@@ -707,7 +708,7 @@ spdk_blob_io_write(struct spdk_blob *blob, struct spdk_io_channel *channel,
 		   spdk_blob_op_complete cb_fn, void *cb_arg)
 {
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	cb_fn(cb_arg, 0);
@@ -718,7 +719,7 @@ spdk_blob_io_unmap(struct spdk_blob *blob, struct spdk_io_channel *channel,
 		   uint64_t offset, uint64_t length, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	cb_fn(cb_arg, 0);
@@ -729,7 +730,7 @@ spdk_blob_io_write_zeroes(struct spdk_blob *blob, struct spdk_io_channel *channe
 			  uint64_t offset, uint64_t length, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	cb_fn(cb_arg, 0);
@@ -741,7 +742,7 @@ spdk_blob_io_writev(struct spdk_blob *blob, struct spdk_io_channel *channel,
 		    spdk_blob_op_complete cb_fn, void *cb_arg)
 {
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	cb_fn(cb_arg, 0);
@@ -756,7 +757,7 @@ spdk_blob_io_writev_ext(struct spdk_blob *blob, struct spdk_io_channel *channel,
 	struct vbdev_lvol_io *lvol_io = (struct vbdev_lvol_io *)g_io->driver_ctx;
 
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	CU_ASSERT(io_opts == &lvol_io->ext_io_opts);
@@ -770,7 +771,7 @@ spdk_blob_io_readv(struct spdk_blob *blob, struct spdk_io_channel *channel,
 		   spdk_blob_op_complete cb_fn, void *cb_arg)
 {
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	cb_fn(cb_arg, 0);
@@ -785,7 +786,7 @@ spdk_blob_io_readv_ext(struct spdk_blob *blob, struct spdk_io_channel *channel,
 	struct vbdev_lvol_io *lvol_io = (struct vbdev_lvol_io *)g_io->driver_ctx;
 
 	CU_ASSERT(blob == NULL);
-	CU_ASSERT(channel == g_ch);
+	CU_ASSERT(channel == g_bs_ch);
 	CU_ASSERT(offset == g_io->u.bdev.offset_blocks);
 	CU_ASSERT(length == g_io->u.bdev.num_blocks);
 	CU_ASSERT(io_opts == &lvol_io->ext_io_opts);
@@ -1726,19 +1727,23 @@ ut_lvol_read_write(void)
 	g_io->u.bdev.offset_blocks = 20;
 	g_io->u.bdev.num_blocks = 20;
 
-	lvol_read(g_ch, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_READ;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS);
 
-	lvol_write(g_lvol, g_ch, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_WRITE;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS);
 
 	g_ext_api_called = false;
-	lvol_read(g_ch, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_READ;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_ext_api_called == true);
 	g_ext_api_called = false;
 
-	lvol_write(g_lvol, g_ch, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_WRITE;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_ext_api_called == true);
 	g_ext_api_called = false;
@@ -1751,19 +1756,25 @@ ut_lvol_read_write(void)
 static void
 ut_vbdev_lvol_submit_request(void)
 {
-	struct spdk_lvol request_lvol = {};
-	g_io = calloc(1, sizeof(struct spdk_bdev_io));
+	g_io = calloc(1, sizeof(struct spdk_bdev_io) + vbdev_lvs_get_ctx_size());
 	SPDK_CU_ASSERT_FATAL(g_io != NULL);
 	g_base_bdev = calloc(1, sizeof(struct spdk_bdev));
 	SPDK_CU_ASSERT_FATAL(g_base_bdev != NULL);
+	g_lvol = calloc(1, sizeof(struct spdk_lvol));
+	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
+
 	g_io->bdev = g_base_bdev;
+	g_io->bdev->ctxt = g_lvol;
+	g_io->u.bdev.offset_blocks = 20;
+	g_io->u.bdev.num_blocks = 20;
 
 	g_io->type = SPDK_BDEV_IO_TYPE_READ;
-	g_base_bdev->ctxt = &request_lvol;
 	vbdev_lvol_submit_request(g_ch, g_io);
+	CU_ASSERT(g_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS);
 
 	free(g_io);
 	free(g_base_bdev);
+	free(g_lvol);
 }
 
 static void
@@ -1836,25 +1847,29 @@ ut_lvol_seek(void)
 
 	/* Data found */
 	g_io->u.bdev.offset_blocks = 10;
-	lvol_seek_data(g_lvol, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_SEEK_DATA;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_io->u.bdev.seek.offset == g_blob_allocated_io_unit_offset);
 
 	/* Data not found */
 	g_io->u.bdev.offset_blocks = 30;
-	lvol_seek_data(g_lvol, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_SEEK_DATA;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_io->u.bdev.seek.offset == UINT64_MAX);
 
 	/* Hole found */
 	g_io->u.bdev.offset_blocks = 10;
-	lvol_seek_hole(g_lvol, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_SEEK_HOLE;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_io->u.bdev.seek.offset == 10);
 
 	/* Hole not found */
 	g_io->u.bdev.offset_blocks = 30;
-	lvol_seek_hole(g_lvol, g_io);
+	g_io->type = SPDK_BDEV_IO_TYPE_SEEK_HOLE;
+	vbdev_lvol_submit_request(g_ch, g_io);
 	CU_ASSERT(g_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_io->u.bdev.seek.offset == UINT64_MAX);
 
