@@ -10,7 +10,7 @@ source $rootdir/test/lvol/common.sh
 source $rootdir/test/bdev/nbd_common.sh
 
 NUM_CLUSTERS=10
-LVS_DEFAULT_CLUSTER_SIZE_BTYE=$((LVS_DEFAULT_CLUSTER_SIZE_MB*1024*1024))
+LVS_DEFAULT_CLUSTER_SIZE_BTYE=$((LVS_DEFAULT_CLUSTER_SIZE_MB * 1024 * 1024))
 
 function verify() {
 	local fragmap="$1"
@@ -68,12 +68,12 @@ function test_fragmap_data_hole() {
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "$NUM_CLUSTERS" "1" "AQA="
 
 	# Read fragmap [0, 5) clusters
-	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset 0 --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "1" "AQ=="
 
 	# Read fragmap [5, 10) clusters
-	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset $offset --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "0" "AA=="
 
@@ -105,12 +105,12 @@ function test_fragmap_hole_data() {
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "$NUM_CLUSTERS" "1" "AAI="
 
 	# Read fragmap [0, 5) clusters
-	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset 0 --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "0" "AA=="
 
 	# Read fragmap [5, 10) clusters
-	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset $offset --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "1" "EA=="
 
@@ -142,12 +142,12 @@ function test_fragmap_hole_data_hole() {
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "$NUM_CLUSTERS" "2" "YAA="
 
 	# Read fragmap [0, 5) clusters
-	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset 0 --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "0" "AA=="
 
 	# Read fragmap [5, 10) clusters
-	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset $offset --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "2" "Aw=="
 
@@ -180,12 +180,12 @@ function test_fragmap_data_hole_data() {
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "$NUM_CLUSTERS" "6" "hwM="
 
 	# Read fragmap [0, 5) clusters
-	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	size=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset 0 --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "3" "Bw=="
 
 	# Read fragmap [5, 10) clusters
-	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE*5))
+	offset=$((LVS_DEFAULT_CLUSTER_SIZE_BTYE * 5))
 	fragmap=$(rpc_cmd bdev_lvol_get_fragmap --offset $offset --size $size $lvol_uuid)
 	verify "$fragmap" "$LVS_DEFAULT_CLUSTER_SIZE_BTYE" "5" "3" "HA=="
 
@@ -197,7 +197,6 @@ function test_fragmap_data_hole_data() {
 	rpc_cmd bdev_malloc_delete "$malloc_name"
 	check_leftover_devices
 }
-
 
 $SPDK_BIN_DIR/spdk_tgt &
 spdk_pid=$!
