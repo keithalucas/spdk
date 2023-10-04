@@ -921,7 +921,7 @@ lvol_seek_data(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
 	bdev_io->u.bdev.seek.offset = spdk_blob_get_next_allocated_io_unit(lvol->blob,
 				      bdev_io->u.bdev.offset_blocks);
 
-	spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+	lvol_op_comp(bdev_io, 0);
 }
 
 static void
@@ -930,7 +930,7 @@ lvol_seek_hole(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io)
 	bdev_io->u.bdev.seek.offset = spdk_blob_get_next_unallocated_io_unit(lvol->blob,
 				      bdev_io->u.bdev.offset_blocks);
 
-	spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+	lvol_op_comp(bdev_io, 0);
 }
 
 static void
@@ -985,7 +985,7 @@ lvol_write(struct spdk_lvol *lvol, struct spdk_io_channel *ch, struct spdk_bdev_
 static int
 lvol_reset(struct spdk_bdev_io *bdev_io)
 {
-	spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
+	lvol_op_comp(bdev_io, -EPERM);
 
 	return 0;
 }
