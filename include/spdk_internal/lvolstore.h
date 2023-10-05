@@ -12,6 +12,7 @@
 #include "spdk/queue.h"
 #include "spdk/tree.h"
 #include "spdk/uuid.h"
+#include "spdk/thread.h"
 
 /* Default size of blobstore cluster */
 #define SPDK_LVS_OPTS_CLUSTER_SZ (4 * 1024 * 1024)
@@ -111,6 +112,8 @@ struct spdk_lvol_store {
 	struct spdk_thread		*thread;
 };
 
+typedef TAILQ_HEAD(, freezing_lvol) freeze_lvol_tailq_t;
+
 struct spdk_lvol {
 	struct spdk_lvol_store		*lvol_store;
 	struct spdk_blob		*blob;
@@ -127,6 +130,10 @@ struct spdk_lvol {
 	TAILQ_ENTRY(spdk_lvol)		link;
 	struct spdk_lvs_degraded_lvol_set *degraded_set;
 	TAILQ_ENTRY(spdk_lvol)		degraded_link;
+
+	struct spdk_spinlock		spinlock;
+	freeze_lvol_tailq_t		ongoing_quiescences;	/* Protected by spinlock */
+	freeze_lvol_tailq_t		pending_quiescences;	/* Protected by spinlock */
 };
 
 struct spdk_fragmap {

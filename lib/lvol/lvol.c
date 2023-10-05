@@ -119,12 +119,20 @@ lvol_alloc(struct spdk_lvol_store *lvs, const char *name, bool thin_provision,
 
 	TAILQ_INSERT_TAIL(&lvs->pending_lvols, lvol, link);
 
+	spdk_spin_init(&lvol->spinlock);
+	TAILQ_INIT(&lvol->ongoing_quiescences);
+	TAILQ_INIT(&lvol->pending_quiescences);
+
 	return lvol;
 }
 
 static void
 lvol_free(struct spdk_lvol *lvol)
 {
+	if (lvol != NULL) {
+		spdk_spin_destroy(&lvol->spinlock);
+	}
+
 	free(lvol);
 }
 
@@ -322,6 +330,10 @@ load_next_lvol(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 	if (rc == 0 && value_len <= SPDK_CREATION_TIME_MAX) {
 		snprintf(lvol->creation_time, sizeof(lvol->creation_time), "%s", attr);
 	}
+
+	spdk_spin_init(&lvol->spinlock);
+	TAILQ_INIT(&lvol->ongoing_quiescences);
+	TAILQ_INIT(&lvol->pending_quiescences);
 
 	TAILQ_INSERT_TAIL(&lvs->lvols, lvol, link);
 
@@ -1011,7 +1023,7 @@ spdk_lvs_destroy(struct spdk_lvol_store *lvs, spdk_lvs_op_complete cb_fn,
 	}
 
 	TAILQ_FOREACH_SAFE(iter_lvol, &lvs->lvols, link, tmp) {
-		free(iter_lvol);
+		lvol_free(iter_lvol);
 	}
 
 	lvs_req = calloc(1, sizeof(*lvs_req));

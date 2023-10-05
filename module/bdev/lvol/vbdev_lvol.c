@@ -15,13 +15,31 @@
 
 #include "vbdev_lvol.h"
 
+struct freezing_lvol {
+	struct spdk_lvol		*lvol;
+	void				*ctx;
+	struct spdk_thread		*owner_thread;
+	struct spdk_io_channel		*owner_ch;
+	TAILQ_ENTRY(freezing_lvol)	tailq;
+};
+
 struct spdk_lvol_channel {
 	/* The channel for the underlying blobstore device */
-	struct spdk_io_channel	*bs_channel;
+	struct spdk_io_channel		*bs_channel;
+
+	/* List of submitted I/O that are currently running */
+	TAILQ_HEAD(, vbdev_lvol_io)	submitted_io;
+
+	/* List of spdk_bdev_io that are currently queued because they write to a frozen lvol */
+	TAILQ_HEAD(, vbdev_lvol_io)	queued_io;
+
+	/* List of freeze operations on the channel's lvol */
+	freeze_lvol_tailq_t		freezings;
 };
 
 struct vbdev_lvol_io {
 	struct spdk_blob_ext_io_opts ext_io_opts;
+	TAILQ_ENTRY(vbdev_lvol_io) link;
 };
 
 static TAILQ_HEAD(, lvol_store_bdev) g_spdk_lvol_pairs = TAILQ_HEAD_INITIALIZER(
@@ -124,13 +142,50 @@ _vbdev_lvol_change_bdev_alias(struct spdk_lvol *lvol, const char *new_lvol_name)
 	return 0;
 }
 
+static void
+vbdev_lvol_channel_destroy_resource(struct spdk_lvol_channel *ch)
+{
+	struct freezing_lvol *freezing;
+
+	while (!TAILQ_EMPTY(&ch->freezings)) {
+		freezing = TAILQ_FIRST(&ch->freezings);
+		TAILQ_REMOVE(&ch->freezings, freezing, tailq);
+		free(freezing);
+	}
+
+	spdk_put_io_channel(ch->bs_channel);
+
+	assert(TAILQ_EMPTY(&ch->queued_io));
+	assert(TAILQ_EMPTY(&ch->submitted_io));
+}
+
 static int
 vbdev_lvol_channel_create(void *io_device, void *ctx_buf)
 {
 	struct spdk_lvol		*lvol = io_device;
 	struct spdk_lvol_channel	*channel = ctx_buf;
+	struct freezing_lvol		*freezing;
 
 	channel->bs_channel = spdk_lvol_get_io_channel(lvol);
+	TAILQ_INIT(&channel->submitted_io);
+	TAILQ_INIT(&channel->queued_io);
+	TAILQ_INIT(&channel->freezings);
+
+	spdk_spin_lock(&lvol->spinlock);
+	TAILQ_FOREACH(freezing, &lvol->ongoing_quiescences, tailq) {
+		struct freezing_lvol *new_freezing;
+
+		new_freezing = calloc(1, sizeof(*new_freezing));
+		if (new_freezing == NULL) {
+			spdk_spin_unlock(&lvol->spinlock);
+			vbdev_lvol_channel_destroy_resource(channel);
+			return -1;
+		}
+		new_freezing->lvol = freezing->lvol;
+		new_freezing->ctx = freezing->ctx;
+		TAILQ_INSERT_TAIL(&channel->freezings, new_freezing, tailq);
+	}
+	spdk_spin_unlock(&lvol->spinlock);
 
 	return 0;
 }
@@ -140,7 +195,7 @@ vbdev_lvol_channel_destroy(void *io_device, void *ctx_buf)
 {
 	struct spdk_lvol_channel *channel = ctx_buf;
 
-	spdk_put_io_channel(channel->bs_channel);
+	vbdev_lvol_channel_destroy_resource(channel);
 }
 
 static int
@@ -888,6 +943,8 @@ lvol_op_comp(void *cb_arg, int bserrno)
 {
 	struct spdk_bdev_io *bdev_io = cb_arg;
 	enum spdk_bdev_io_status status = SPDK_BDEV_IO_STATUS_SUCCESS;
+	struct spdk_io_channel *channel = spdk_bdev_io_get_io_channel(bdev_io);
+	struct spdk_lvol_channel *lvol_channel = spdk_io_channel_get_ctx(channel);
 
 	if (bserrno != 0) {
 		if (bserrno == -ENOMEM) {
@@ -896,6 +953,8 @@ lvol_op_comp(void *cb_arg, int bserrno)
 			status = SPDK_BDEV_IO_STATUS_FAILED;
 		}
 	}
+
+	TAILQ_REMOVE(&lvol_channel->submitted_io, (struct vbdev_lvol_io *)bdev_io->driver_ctx, link);
 
 	spdk_bdev_io_complete(bdev_io, status);
 }
@@ -1003,8 +1062,15 @@ lvol_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io, bool s
 static void
 vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
+	struct vbdev_lvol_io *lvol_io = (struct vbdev_lvol_io *)bdev_io->driver_ctx;
 	struct spdk_lvol *lvol = bdev_io->bdev->ctxt;
 	struct spdk_lvol_channel *lvol_ch = (struct spdk_lvol_channel *)spdk_io_channel_get_ctx(ch);
+
+	if (!TAILQ_EMPTY(&lvol_ch->freezings)) {
+		TAILQ_INSERT_TAIL(&lvol_ch->queued_io, lvol_io, link);
+		return;
+	}
+	TAILQ_INSERT_TAIL(&lvol_ch->submitted_io, lvol_io, link);
 
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
@@ -2344,6 +2410,297 @@ vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
 		free(req);
 		cb_fn(cb_arg, NULL, rc);
 	}
+}
+
+struct quiesce_lvol_ctx {
+	struct freezing_lvol			freezing;
+	struct freezing_lvol			*current_freezing;
+	struct spdk_poller			*poller;
+	spdk_lvol_op_with_handle_complete	cb_fn;
+	void					*cb_arg;
+};
+
+static void
+_vbdev_lvol_quiesce_error_cleanup_cb(struct spdk_io_channel_iter *i, int status)
+{
+	struct quiesce_lvol_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+
+	ctx->cb_fn(ctx->cb_arg, ctx->freezing.lvol, -ENOMEM);
+	free(ctx);
+}
+
+static void _vbdev_lvol_unquiesce_get_channel(struct spdk_io_channel_iter *i);
+
+static void
+_vbdev_lvol_quiesce_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct quiesce_lvol_ctx	*ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_lvol	*lvol = ctx->freezing.lvol;
+
+	if (status == -ENOMEM) {
+		/* One of the channels could not allocate a freezing_lvol object.
+		 * So we have to go back and clean up any freezings that were
+		 * allocated successfully before we return error status to
+		 * the caller. We can reuse the unquiesce function to do that
+		 * clean up.
+		 */
+		SPDK_ERRLOG("Error %d executing quiesce on lvol %s\n", status, lvol->name);
+		spdk_for_each_channel(lvol, _vbdev_lvol_unquiesce_get_channel, ctx,
+				      _vbdev_lvol_quiesce_error_cleanup_cb);
+		return;
+	}
+
+	/* All channels have freezed this lvol and no I/O are outstanding */
+	ctx->cb_fn(ctx->cb_arg, ctx->freezing.lvol, status);
+
+	/* Don't free the ctx here. Its freezing is in the lvol's global list of
+	 * ongoing quiescences, and will be removed and freed when this freezing
+	 * is later unfrozen.
+	 */
+}
+
+static int
+_vbdev_lvol_quiesce_check_io(void *_i)
+{
+	struct spdk_io_channel_iter	*i = _i;
+	struct quiesce_lvol_ctx		*ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_io_channel		*channel = spdk_io_channel_iter_get_channel(i);
+	struct spdk_lvol_channel	*lvol_channel = spdk_io_channel_get_ctx(channel);
+	struct freezing_lvol		*freezing = ctx->current_freezing;
+	struct spdk_bdev_io		*bdev_io;
+	struct vbdev_lvol_io		*lvol_io;
+
+	spdk_poller_unregister(&ctx->poller);
+
+	/*
+	 * The lvol is now freezed, so no new IO can be submitted to it.
+	 * But we need to wait until any outstanding IO are completed, skipping the current I/O in case the
+	 * quiesce operation is started by a flush bdev_io request. Current I/O can be recognized checking
+	 * for the same channel and the same context of the current quiesce operation.
+	 */
+	TAILQ_FOREACH(lvol_io, &lvol_channel->submitted_io, link) {
+		bdev_io = spdk_bdev_io_from_ctx(lvol_io);
+		if (freezing->owner_ch != channel || freezing->ctx != bdev_io->internal.caller_ctx) {
+			ctx->poller = SPDK_POLLER_REGISTER(_vbdev_lvol_quiesce_check_io, i, 100);
+			return SPDK_POLLER_BUSY;
+		}
+	}
+
+	spdk_for_each_channel_continue(i, 0);
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+_vbdev_lvol_quiesce_get_channel(struct spdk_io_channel_iter *i)
+{
+	struct quiesce_lvol_ctx		*ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_io_channel		*channel = spdk_io_channel_iter_get_channel(i);
+	struct spdk_lvol_channel	*lvol_channel = spdk_io_channel_get_ctx(channel);
+	struct freezing_lvol		*freezing;
+
+	TAILQ_FOREACH(freezing, &lvol_channel->freezings, tailq) {
+		if (freezing->ctx == ctx->freezing.ctx) {
+			/* The lvol is already freezed on this channel, so don't add
+			 * it again.  This can happen when a new channel is created
+			 * while the for_each_channel operation is in progress.
+			 * Do not check for outstanding I/O in that case, since the
+			 * lvol was freezed before any I/O could be submitted to the
+			 * new channel.
+			 */
+			spdk_for_each_channel_continue(i, 0);
+			return;
+		}
+	}
+
+	freezing = calloc(1, sizeof(*freezing));
+	if (freezing == NULL) {
+		SPDK_ERRLOG("Cannot alloc memory for freezing quiesce channel of lvol %s\n",
+			    ctx->freezing.lvol->name);
+		spdk_for_each_channel_continue(i, -ENOMEM);
+		return;
+	}
+
+	freezing->lvol = ctx->freezing.lvol;
+	freezing->ctx = ctx->freezing.ctx;
+	freezing->owner_ch = ctx->freezing.owner_ch;
+	ctx->current_freezing = freezing;
+	TAILQ_INSERT_TAIL(&lvol_channel->freezings, freezing, tailq);
+
+	_vbdev_lvol_quiesce_check_io(i);
+}
+
+static void
+_vbdev_lvol_quiesce_ctx(struct spdk_lvol *lvol, struct quiesce_lvol_ctx *ctx)
+{
+	assert(spdk_get_thread() == ctx->freezing.owner_thread);
+	assert(ctx->freezing.owner_ch == NULL ||
+	       spdk_io_channel_get_thread(ctx->freezing.owner_ch) == ctx->freezing.owner_thread);
+
+	/* We will add a copy of this freezing_lvol to each channel now. */
+	spdk_for_each_channel(lvol, _vbdev_lvol_quiesce_get_channel, ctx, _vbdev_lvol_quiesce_done);
+}
+
+int _vbdev_lvol_quiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
+			spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
+
+int
+_vbdev_lvol_quiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
+		    spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
+{
+	struct quiesce_lvol_ctx *ctx;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		SPDK_ERRLOG("Cannot alloc memory for context quiesce of lvol %s\n", lvol->name);
+		return -ENOMEM;
+	}
+
+	ctx->freezing.lvol = lvol;
+	ctx->freezing.ctx = cb_arg;
+	ctx->freezing.owner_thread = spdk_get_thread();
+	if (bdev_io != NULL) {
+		ctx->freezing.ctx = bdev_io->internal.caller_ctx;
+		ctx->freezing.owner_ch =  spdk_bdev_io_get_io_channel(bdev_io);
+	}
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	spdk_spin_lock(&lvol->spinlock);
+	if (!TAILQ_EMPTY(&lvol->ongoing_quiescences)) {
+		/*
+		 * There is an active quiescence on this lvol (currently only one by one
+		 * quiescence can be running, so the list shouldn't be necessary, but maybe
+		 * in the future it could be useful to have multiple different operations).
+		 * Put it on the pending list until lvol isn't quiesced anymore.
+		 */
+		TAILQ_INSERT_TAIL(&lvol->pending_quiescences, &ctx->freezing, tailq);
+	} else {
+		TAILQ_INSERT_TAIL(&lvol->ongoing_quiescences, &ctx->freezing, tailq);
+		_vbdev_lvol_quiesce_ctx(lvol, ctx);
+	}
+	spdk_spin_unlock(&lvol->spinlock);
+
+	return 0;
+}
+
+static void
+_vbdev_lvol_quiesce_ctx_msg(void *_ctx)
+{
+	struct quiesce_lvol_ctx *ctx = _ctx;
+
+	_vbdev_lvol_quiesce_ctx(ctx->freezing.lvol, ctx);
+}
+
+static void
+_vbdev_lvol_unquiesce_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct quiesce_lvol_ctx	*ctx = spdk_io_channel_iter_get_ctx(i);
+	struct quiesce_lvol_ctx	*queued_ctx;
+	struct spdk_lvol	*lvol = ctx->freezing.lvol;
+	struct freezing_lvol	*freezing, *tmp;
+
+	spdk_spin_lock(&lvol->spinlock);
+	/* Check if there are any pending quiesce operations. If there are, calling
+	 * _vbdev_lvol_quiesce_ctx which will start the quiesce process.
+	 */
+	TAILQ_FOREACH_SAFE(freezing, &lvol->pending_quiescences, tailq, tmp) {
+		TAILQ_REMOVE(&lvol->pending_quiescences, freezing, tailq);
+		queued_ctx = SPDK_CONTAINEROF(freezing, struct quiesce_lvol_ctx, freezing);
+		TAILQ_INSERT_TAIL(&lvol->ongoing_quiescences, freezing, tailq);
+		spdk_thread_send_msg(queued_ctx->freezing.owner_thread,
+				     _vbdev_lvol_quiesce_ctx_msg, queued_ctx);
+	}
+	spdk_spin_unlock(&lvol->spinlock);
+
+	ctx->cb_fn(ctx->cb_arg, ctx->freezing.lvol, status);
+	free(ctx);
+}
+
+static void
+_vbdev_lvol_unquiesce_get_channel(struct spdk_io_channel_iter *i)
+{
+	struct quiesce_lvol_ctx		*ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_io_channel		*channel = spdk_io_channel_iter_get_channel(i);
+	struct spdk_lvol_channel	*lvol_channel = spdk_io_channel_get_ctx(channel);
+	TAILQ_HEAD(, vbdev_lvol_io)	queued_io;
+	struct spdk_bdev_io		*bdev_io;
+	struct spdk_io_channel		*bdev_io_channel;
+	struct freezing_lvol		*freezing;
+	struct vbdev_lvol_io		*lvol_io;
+
+	TAILQ_FOREACH(freezing, &lvol_channel->freezings, tailq) {
+		if (ctx->freezing.ctx == freezing->ctx) {
+			TAILQ_REMOVE(&lvol_channel->freezings, freezing, tailq);
+			free(freezing);
+			break;
+		}
+	}
+
+	/* Note: we should almost always be able to assert that the freezing specified
+	 * was found. But there are some very rare corner cases where a new channel
+	 * gets created simultaneously with an unquiesce, where this function
+	 * would execute on that new channel and wouldn't have the freezing.
+	 * We also use this to clean up freezing allocations when a later allocation
+	 * fails in the quiesce path.
+	 * So we can't actually assert() here.
+	 */
+
+	/* Swap the queued IO into a temporary list, and then try to submit them again */
+	TAILQ_INIT(&queued_io);
+	TAILQ_SWAP(&lvol_channel->queued_io, &queued_io, vbdev_lvol_io, link);
+	while (!TAILQ_EMPTY(&queued_io)) {
+		lvol_io = TAILQ_FIRST(&queued_io);
+		bdev_io = spdk_bdev_io_from_ctx(lvol_io);
+		TAILQ_REMOVE(&queued_io, lvol_io, link);
+		bdev_io_channel = spdk_bdev_io_get_io_channel(bdev_io);
+		vbdev_lvol_submit_request(bdev_io_channel, bdev_io);
+	}
+
+	spdk_for_each_channel_continue(i, 0);
+}
+
+int _vbdev_lvol_unquiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
+			  spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
+
+int
+_vbdev_lvol_unquiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
+		      spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
+{
+	struct quiesce_lvol_ctx		*ctx;
+	struct freezing_lvol		*freezing;
+	struct spdk_io_channel		*channel = NULL;
+	void				*io_ctx = NULL;
+
+	if (bdev_io != NULL) {
+		channel = spdk_bdev_io_get_io_channel(bdev_io);
+		io_ctx = bdev_io->internal.caller_ctx;
+	};
+
+	spdk_spin_lock(&lvol->spinlock);
+	/* To start the unquiesce process, we find the freezing in the lvol's ongoing_quiescences
+	 * and remove it. This ensures new channels don't inherit the ongoing quiescence.
+	 * Then we will send a message to each channel to remove the freezing from its
+	 * per-channel list.
+	 */
+	TAILQ_FOREACH(freezing, &lvol->ongoing_quiescences, tailq) {
+		if (freezing->lvol == lvol && freezing->ctx == io_ctx && freezing->owner_ch == channel) {
+			break;
+		}
+	}
+	if (freezing == NULL) {
+		SPDK_ERRLOG("Cannot execute unquiesce on lvol %s, freezing not found\n", lvol->name);
+		spdk_spin_unlock(&lvol->spinlock);
+		return -EINVAL;
+	}
+	TAILQ_REMOVE(&lvol->ongoing_quiescences, freezing, tailq);
+	ctx = SPDK_CONTAINEROF(freezing, struct quiesce_lvol_ctx, freezing);
+	spdk_spin_unlock(&lvol->spinlock);
+
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	spdk_for_each_channel(lvol, _vbdev_lvol_unquiesce_get_channel, ctx, _vbdev_lvol_unquiesce_done);
+	return 0;
 }
 
 SPDK_LOG_REGISTER_COMPONENT(vbdev_lvol)
