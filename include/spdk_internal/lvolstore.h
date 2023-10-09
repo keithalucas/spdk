@@ -102,7 +102,7 @@ struct spdk_lvol_store {
 	struct spdk_thread		*thread;
 };
 
-typedef TAILQ_HEAD(, freezing_lvol) freeze_lvol_tailq_t;
+typedef TAILQ_HEAD(, freeze_range) lvol_freeze_range_tailq_t;
 
 struct spdk_lvol {
 	struct spdk_lvol_store		*lvol_store;
@@ -122,8 +122,16 @@ struct spdk_lvol {
 	TAILQ_ENTRY(spdk_lvol)		degraded_link;
 
 	struct spdk_spinlock		spinlock;
-	freeze_lvol_tailq_t		ongoing_quiescences;	/* Protected by spinlock */
-	freeze_lvol_tailq_t		pending_quiescences;	/* Protected by spinlock */
+	/*
+	 * Currently freezed ranges for this lvol. Used to populate new channels.
+	 * Protected by spinlock.
+	 */
+	lvol_freeze_range_tailq_t	freezed_ranges;
+	/* Pending freezed ranges for this lvol. These ranges are not currently
+	 * freezed due to overlapping with another freezed range.
+	 * Protected by spinlock.
+	 */
+	lvol_freeze_range_tailq_t	pending_freezed_ranges;
 };
 
 struct spdk_fragmap {
