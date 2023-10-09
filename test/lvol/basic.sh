@@ -558,6 +558,35 @@ function test_lvol_list() {
 	check_leftover_devices
 }
 
+# Run fio test on lvol with with fsync enabled to test I/O flush in vbdev_lvol layer.
+# Better test should be performed to test concurrent flush operations, but to do this
+# we shoudl start more than 1 job in fio and a jobfile is needed to do that. Moreover,
+# we should test concurrent flush and write operations, but to do that we should use
+# a different export method than nbd like for example nvmf that has multiple queues.
+# So in the future a lvol test inside nvmf should be created to test better lvol flush.
+function test_lvol_flush() {
+	# Create lvs
+	local nbd_name=/dev/nbd0
+
+	bs_malloc_name=$(rpc_cmd bdev_malloc_create 20 $MALLOC_BS)
+	lvs_uuid=$(rpc_cmd bdev_lvol_create_lvstore "$bs_malloc_name" lvs_test)
+
+	# Create lvol with 4 cluster
+	lvol_size=$((LVS_DEFAULT_CLUSTER_SIZE_MB * 4))
+	lvol_uuid=$(rpc_cmd bdev_lvol_create -u "$lvs_uuid" lvol_test "$lvol_size" -t)
+
+	nbd_start_disks "$DEFAULT_RPC_ADDR" "$lvol_uuid" "$nbd_name"
+	run_fio_test "$nbd_name" 0 "$LVS_DEFAULT_CLUSTER_SIZE" write 0xdd --fsync=1
+	nbd_stop_disks "$DEFAULT_RPC_ADDR" "$nbd_name"
+
+	rpc_cmd bdev_lvol_delete "$lvol_uuid"
+	rpc_cmd bdev_lvol_delete_lvstore -u "$lvs_uuid"
+	rpc_cmd bdev_malloc_delete "$bs_malloc_name"
+
+	check_leftover_devices
+
+}
+
 # Send SIGTERM after creating lvol store
 function test_sigterm() {
 	# create an lvol store
@@ -589,6 +618,7 @@ run_test "test_construct_lvol_full_lvs" test_construct_lvol_full_lvs
 run_test "test_construct_lvol_alias_conflict" test_construct_lvol_alias_conflict
 run_test "test_construct_nested_lvol" test_construct_nested_lvol
 run_test "test_lvol_list" test_lvol_list
+run_test "test_lvol_flush" test_lvol_flush
 run_test "test_sigterm" test_sigterm
 
 trap - SIGINT SIGTERM EXIT

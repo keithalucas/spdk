@@ -847,8 +847,8 @@ _lvol_create(struct spdk_lvol_store *lvs)
 	lvol->ref_count++;
 	snprintf(lvol->unique_id, sizeof(lvol->unique_id), "%s", "UNIT_TEST_UUID");
 	spdk_spin_init(&lvol->spinlock);
-	TAILQ_INIT(&lvol->ongoing_quiescences);
-	TAILQ_INIT(&lvol->pending_quiescences);
+	TAILQ_INIT(&lvol->freezed_ranges);
+	TAILQ_INIT(&lvol->pending_freezed_ranges);
 
 	TAILQ_INSERT_TAIL(&lvol->lvol_store->lvols, lvol, link);
 
@@ -1788,10 +1788,10 @@ ut_vbdev_lvol_io_type_supported(void)
 	CU_ASSERT(ret == true);
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_SEEK_HOLE);
 	CU_ASSERT(ret == true);
+	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_FLUSH);
+	CU_ASSERT(ret == true);
 
 	/* Unsupported types */
-	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_FLUSH);
-	CU_ASSERT(ret == false);
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_NVME_ADMIN);
 	CU_ASSERT(ret == false);
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_NVME_IO);
@@ -1808,6 +1808,8 @@ ut_vbdev_lvol_io_type_supported(void)
 	CU_ASSERT(ret == true);
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_SEEK_HOLE);
 	CU_ASSERT(ret == true);
+	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_FLUSH);
+	CU_ASSERT(ret == true);
 
 	/* Unsupported types */
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_WRITE);
@@ -1815,8 +1817,6 @@ ut_vbdev_lvol_io_type_supported(void)
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_UNMAP);
 	CU_ASSERT(ret == false);
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_WRITE_ZEROES);
-	CU_ASSERT(ret == false);
-	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_FLUSH);
 	CU_ASSERT(ret == false);
 	ret = vbdev_lvol_io_type_supported(lvol, SPDK_BDEV_IO_TYPE_NVME_ADMIN);
 	CU_ASSERT(ret == false);
@@ -1895,6 +1895,69 @@ ut_lvol_read_write(void)
 	_vbdev_lvol_put_io_channel(io_ch);
 	vbdev_lvol_destroy(g_lvol, lvol_store_op_complete, NULL);
 	CU_ASSERT(g_lvol == NULL);
+	vbdev_lvs_destruct(lvs, lvol_store_op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	CU_ASSERT(g_lvol_store == NULL);
+}
+
+static void
+ut_lvol_flush(void)
+{
+	struct spdk_lvol_store *lvs;
+	struct spdk_lvol *lvol = NULL;
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_io *io;
+	struct spdk_bdev *bdev;
+	int sz = 10;
+	int rc;
+
+	ut_init_bdev(DEFAULT_BDEV_NAME, DEFAULT_BDEV_UUID);
+
+	/* Lvol store is successfully created */
+	rc = vbdev_lvs_create("bdev", "lvs", 0, LVS_CLEAR_WITH_UNMAP, 0,
+			      lvol_store_op_with_handle_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol_store != NULL);
+	CU_ASSERT(g_lvol_store->bs_dev != NULL);
+	lvs = g_lvol_store;
+
+	/* Successful lvol create */
+	g_lvolerrno = -1;
+	rc = vbdev_lvol_create(lvs, "lvol_sc", sz, false, LVOL_CLEAR_WITH_DEFAULT,
+			       vbdev_lvol_create_complete,
+			       NULL);
+	SPDK_CU_ASSERT_FATAL(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
+	CU_ASSERT(g_lvolerrno == 0);
+
+	lvol = g_lvol;
+	io_ch = _vbdev_lvol_get_io_channel(lvol);
+
+	/* Bdev io allocation */
+	io = calloc(1, sizeof(struct spdk_bdev_io) + vbdev_lvs_get_ctx_size());
+	bdev = calloc(1, sizeof(struct spdk_bdev));
+	io->bdev = bdev;
+	io->bdev->ctxt = lvol;
+
+	/* Flushing */
+	io->type = SPDK_BDEV_IO_TYPE_FLUSH;
+	vbdev_lvol_submit_request(io_ch, io);
+	poll_threads();
+	CU_ASSERT(io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	/* Release bdev io */
+	free(io);
+	free(bdev);
+
+	/* Release io channel */
+	_vbdev_lvol_put_io_channel(io_ch);
+
+	/* Successful lvol destroy */
+	vbdev_lvol_destroy(g_lvol, lvol_store_op_complete, NULL);
+	CU_ASSERT(g_lvol == NULL);
+
+	/* Destroy lvol store */
 	vbdev_lvs_destruct(lvs, lvol_store_op_complete, NULL);
 	CU_ASSERT(g_lvserrno == 0);
 	CU_ASSERT(g_lvol_store == NULL);
@@ -2242,7 +2305,7 @@ ut_lvol_quiesce(void)
 	struct spdk_lvol *lvol = NULL;
 	struct spdk_io_channel *io_ch;
 	struct spdk_lvol_channel *lvol_ch;
-	struct freezing_lvol *freezing;
+	struct freeze_range *range;
 	int sz = 10;
 	int rc;
 
@@ -2275,62 +2338,105 @@ ut_lvol_quiesce(void)
 	SPDK_CU_ASSERT_FATAL(g_io != NULL);
 	g_io->internal.caller_ctx = lvol;
 
-	/* Successful quiesce */
+	/* Successful quiesce of entire lvol */
 	g_lvolerrno = 1;
 	rc = _vbdev_lvol_quiesce(lvol, NULL, vbdev_quiesce_complete, NULL);
 	CU_ASSERT(rc == 0);
-	CU_ASSERT(!TAILQ_EMPTY(&lvol->ongoing_quiescences));
-	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_quiescences));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
 	poll_threads();
 	CU_ASSERT(g_lvolerrno == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&lvol_ch->freezed_ranges));
 
-	freezing = TAILQ_FIRST(&lvol_ch->freezings);
-	SPDK_CU_ASSERT_FATAL(freezing != NULL);
-	CU_ASSERT(freezing->lvol == lvol);
-	CU_ASSERT(freezing->ctx == NULL);
+	range = TAILQ_FIRST(&lvol_ch->freezed_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 0);
+	CU_ASSERT(range->length == lvol->bdev->blockcnt);
+	CU_ASSERT(range->freezed_ctx == NULL);
 
 	/* Unquiesce must exactly match a quiesce, i.e. bdev_io must be the same */
 	rc = _vbdev_lvol_unquiesce(lvol, g_io, vbdev_quiesce_complete, NULL);
 	CU_ASSERT(rc == -EINVAL);
-	CU_ASSERT(!TAILQ_EMPTY(&lvol->ongoing_quiescences));
-	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_quiescences));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
 
 	/* Successful unquiesce */
 	g_lvolerrno = 1;
 	rc = _vbdev_lvol_unquiesce(lvol, NULL, vbdev_quiesce_complete, NULL);
 	CU_ASSERT(rc == 0);
-	CU_ASSERT(TAILQ_EMPTY(&lvol->ongoing_quiescences));
-	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_quiescences));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
 	poll_threads();
 	CU_ASSERT(g_lvolerrno == 0);
+	CU_ASSERT(TAILQ_EMPTY(&lvol_ch->freezed_ranges));
 
-	/* Double quiesce */
+	/* Double quiesce overlapping, one of entire lvol and one of a specific range */
 	g_lvolerrno = 1;
 	rc = _vbdev_lvol_quiesce(lvol, NULL, vbdev_quiesce_complete, NULL);
 	CU_ASSERT(rc == 0);
+	g_io->u.bdev.offset_blocks = 0;
+	g_io->u.bdev.num_blocks = 10;
 	rc = _vbdev_lvol_quiesce(lvol, g_io, vbdev_quiesce_complete, NULL);
 	CU_ASSERT(rc == 0);
-	CU_ASSERT(!TAILQ_EMPTY(&lvol->ongoing_quiescences));
-	CU_ASSERT(!TAILQ_EMPTY(&lvol->pending_quiescences));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->pending_freezed_ranges));
 	poll_threads();
 	CU_ASSERT(g_lvolerrno == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&lvol_ch->freezed_ranges));
 
 	g_lvolerrno = 1;
 	rc = _vbdev_lvol_unquiesce(lvol, NULL, vbdev_quiesce_complete, NULL);
 	CU_ASSERT(rc == 0);
-	CU_ASSERT(TAILQ_EMPTY(&lvol->ongoing_quiescences));
-	CU_ASSERT(!TAILQ_EMPTY(&lvol->pending_quiescences));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->pending_freezed_ranges));
 	poll_threads();
 	CU_ASSERT(g_lvolerrno == 0);
-	CU_ASSERT(!TAILQ_EMPTY(&lvol->ongoing_quiescences));
-	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_quiescences));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol_ch->freezed_ranges));
 
 	rc = _vbdev_lvol_unquiesce(lvol, g_io, vbdev_quiesce_complete, NULL);
 	CU_ASSERT(rc == 0);
 	poll_threads();
 	CU_ASSERT(g_lvolerrno == 0);
-	CU_ASSERT(TAILQ_EMPTY(&lvol->ongoing_quiescences));
-	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_quiescences));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol_ch->freezed_ranges));
+
+	/* Double quiesce not overlapping */
+	g_lvolerrno = 1;
+	rc = _vbdev_lvol_quiesce(lvol, g_io, vbdev_quiesce_complete, NULL);
+	CU_ASSERT(rc == 0);
+	g_io->u.bdev.offset_blocks = 10;
+	g_io->u.bdev.num_blocks = 20;
+	rc = _vbdev_lvol_quiesce(lvol, g_io, vbdev_quiesce_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
+	poll_threads();
+	CU_ASSERT(g_lvolerrno == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&lvol_ch->freezed_ranges));
+
+	g_lvolerrno = 1;
+	rc = _vbdev_lvol_unquiesce(lvol, g_io, vbdev_quiesce_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
+	poll_threads();
+	CU_ASSERT(g_lvolerrno == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
+	CU_ASSERT(!TAILQ_EMPTY(&lvol_ch->freezed_ranges));
+
+	g_io->u.bdev.offset_blocks = 0;
+	g_io->u.bdev.num_blocks = 10;
+	rc = _vbdev_lvol_unquiesce(lvol, g_io, vbdev_quiesce_complete, NULL);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(g_lvolerrno == 0);
+	CU_ASSERT(TAILQ_EMPTY(&lvol->freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol->pending_freezed_ranges));
+	CU_ASSERT(TAILQ_EMPTY(&lvol_ch->freezed_ranges));
 
 	free(g_io);
 
@@ -2369,6 +2475,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, ut_vbdev_lvol_get_io_channel);
 	CU_ADD_TEST(suite, ut_vbdev_lvol_io_type_supported);
 	CU_ADD_TEST(suite, ut_lvol_read_write);
+	CU_ADD_TEST(suite, ut_lvol_flush);
 	CU_ADD_TEST(suite, ut_lvol_examine_config);
 	CU_ADD_TEST(suite, ut_lvol_examine_disk);
 	CU_ADD_TEST(suite, ut_lvol_rename);
