@@ -15,26 +15,28 @@
 
 #include "vbdev_lvol.h"
 
-struct freezing_lvol {
+struct freeze_range {
 	struct spdk_lvol		*lvol;
-	void				*ctx;
+	uint64_t			offset;
+	uint64_t			length;
+	void				*freezed_ctx;
 	struct spdk_thread		*owner_thread;
 	struct spdk_io_channel		*owner_ch;
-	TAILQ_ENTRY(freezing_lvol)	tailq;
+	TAILQ_ENTRY(freeze_range)	tailq;
 };
 
 struct spdk_lvol_channel {
 	/* The channel for the underlying blobstore device */
-	struct spdk_io_channel	*bs_channel;
+	struct spdk_io_channel		*bs_channel;
 
 	/* List of submitted I/O that are currently running */
-	bdev_io_tailq_t		submitted_io;
+	bdev_io_tailq_t			submitted_io;
 
-	/* List of spdk_bdev_io that are currently queued because they write to a frozen lvol */
-	bdev_io_tailq_t		queued_io;
+	/* List of I/O that are currently queued because they write to a frozen range */
+	bdev_io_tailq_t			queued_io;
 
-	/* List of freeze operations on the channel's lvol */
-	freeze_lvol_tailq_t	freezings;
+	/* List of ranges actually freezed */
+	lvol_freeze_range_tailq_t	freezed_ranges;
 };
 
 struct vbdev_lvol_io {
@@ -49,6 +51,11 @@ static void vbdev_lvs_fini_start(void);
 static int vbdev_lvs_get_ctx_size(void);
 static void vbdev_lvs_examine_config(struct spdk_bdev *bdev);
 static void vbdev_lvs_examine_disk(struct spdk_bdev *bdev);
+static int _vbdev_lvol_quiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
+			       spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
+static int _vbdev_lvol_unquiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
+				 spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
+
 static bool g_shutdown_started = false;
 
 struct spdk_bdev_module g_lvol_if = {
@@ -144,12 +151,12 @@ _vbdev_lvol_change_bdev_alias(struct spdk_lvol *lvol, const char *new_lvol_name)
 static void
 vbdev_lvol_channel_destroy_resource(struct spdk_lvol_channel *ch)
 {
-	struct freezing_lvol *freezing;
+	struct freeze_range *range;
 
-	while (!TAILQ_EMPTY(&ch->freezings)) {
-		freezing = TAILQ_FIRST(&ch->freezings);
-		TAILQ_REMOVE(&ch->freezings, freezing, tailq);
-		free(freezing);
+	while (!TAILQ_EMPTY(&ch->freezed_ranges)) {
+		range = TAILQ_FIRST(&ch->freezed_ranges);
+		TAILQ_REMOVE(&ch->freezed_ranges, range, tailq);
+		free(range);
 	}
 
 	spdk_bs_free_io_channel(ch->bs_channel);
@@ -163,26 +170,27 @@ vbdev_lvol_channel_create(void *io_device, void *ctx_buf)
 {
 	struct spdk_lvol		*lvol = io_device;
 	struct spdk_lvol_channel	*channel = ctx_buf;
-	struct freezing_lvol		*freezing;
+	struct freeze_range		*range;
 
 	channel->bs_channel = spdk_lvol_get_io_channel(lvol);
 	TAILQ_INIT(&channel->submitted_io);
 	TAILQ_INIT(&channel->queued_io);
-	TAILQ_INIT(&channel->freezings);
+	TAILQ_INIT(&channel->freezed_ranges);
 
 	spdk_spin_lock(&lvol->spinlock);
-	TAILQ_FOREACH(freezing, &lvol->ongoing_quiescences, tailq) {
-		struct freezing_lvol *new_freezing;
+	TAILQ_FOREACH(range, &lvol->freezed_ranges, tailq) {
+		struct freeze_range *new_range;
 
-		new_freezing = calloc(1, sizeof(*new_freezing));
-		if (new_freezing == NULL) {
+		new_range = calloc(1, sizeof(*new_range));
+		if (new_range == NULL) {
 			spdk_spin_unlock(&lvol->spinlock);
 			vbdev_lvol_channel_destroy_resource(channel);
 			return -1;
 		}
-		new_freezing->lvol = freezing->lvol;
-		new_freezing->ctx = freezing->ctx;
-		TAILQ_INSERT_TAIL(&channel->freezings, new_freezing, tailq);
+		new_range->offset = range->offset;
+		new_range->length = range->length;
+		new_range->freezed_ctx = range->freezed_ctx;
+		TAILQ_INSERT_TAIL(&channel->freezed_ranges, new_range, tailq);
 	}
 	spdk_spin_unlock(&lvol->spinlock);
 
@@ -931,6 +939,7 @@ vbdev_lvol_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 	case SPDK_BDEV_IO_TYPE_READ:
 	case SPDK_BDEV_IO_TYPE_SEEK_DATA:
 	case SPDK_BDEV_IO_TYPE_SEEK_HOLE:
+	case SPDK_BDEV_IO_TYPE_FLUSH:
 		return true;
 	default:
 		return false;
@@ -1059,15 +1068,105 @@ lvol_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io, bool s
 }
 
 static void
+lvol_flush_unquiesce_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
+{
+	struct spdk_bdev_io *bdev_io = cb_arg;
+
+	lvol_op_comp(bdev_io, 0);
+}
+
+static void
+lvol_flush_quiesce_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
+{
+	struct spdk_bdev_io *bdev_io = cb_arg;
+	int rt;
+
+	if (lvolerrno != 0) {
+		lvol_op_comp(bdev_io, lvolerrno);
+	}
+
+	rt = _vbdev_lvol_unquiesce(lvol, bdev_io, lvol_flush_unquiesce_cb, bdev_io);
+	if (rt != 0) {
+		lvol_op_comp(bdev_io, rt);
+	}
+}
+
+static void
+lvol_flush(struct spdk_bdev_io *bdev_io)
+{
+	struct spdk_lvol *lvol = bdev_io->bdev->ctxt;
+	int rt;
+
+	rt = _vbdev_lvol_quiesce(lvol, bdev_io, lvol_flush_quiesce_cb, bdev_io);
+	if (rt != 0) {
+		lvol_op_comp(bdev_io, rt);
+	}
+}
+
+static bool
+lvol_freeze_range_overlapped(struct freeze_range *range1, struct freeze_range *range2)
+{
+	if (range1->length == 0 || range2->length == 0) {
+		return false;
+	}
+
+	if (range1->offset + range1->length <= range2->offset) {
+		return false;
+	}
+
+	if (range2->offset + range2->length <= range1->offset) {
+		return false;
+	}
+
+	return true;
+}
+
+static bool
+bdev_io_range_is_freezed(struct spdk_bdev_io *bdev_io, struct freeze_range *range)
+{
+	struct spdk_io_channel *channel = spdk_bdev_io_get_io_channel(bdev_io);
+	struct freeze_range r;
+
+	switch (bdev_io->type) {
+	case SPDK_BDEV_IO_TYPE_WRITE:
+	case SPDK_BDEV_IO_TYPE_UNMAP:
+	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
+		r.offset = bdev_io->u.bdev.offset_blocks;
+		r.length = bdev_io->u.bdev.num_blocks;
+		if (!lvol_freeze_range_overlapped(range, &r)) {
+			/* This I/O doesn't overlap the specified freezed range. */
+			return false;
+		} else if (range->owner_ch == channel && range->freezed_ctx == bdev_io->internal.caller_ctx) {
+			/* This I/O overlaps, but the I/O is on the same channel that freezed this
+			 * range, and the caller_ctx is the same as the freezed_ctx.  This means
+			 * that this I/O is associated with the freeze, and is allowed to execute.
+			 */
+			return false;
+		} else {
+			return true;
+		}
+	default:
+		return false;
+	}
+}
+
+static void
 vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	struct spdk_lvol *lvol = bdev_io->bdev->ctxt;
 	struct spdk_lvol_channel *lvol_ch = (struct spdk_lvol_channel *)spdk_io_channel_get_ctx(ch);
 
-	if (!TAILQ_EMPTY(&lvol_ch->freezings)) {
-		TAILQ_INSERT_TAIL(&lvol_ch->queued_io, bdev_io, module_link);
-		return;
+	if (!TAILQ_EMPTY(&lvol_ch->freezed_ranges)) {
+		struct freeze_range *range;
+
+		TAILQ_FOREACH(range, &lvol_ch->freezed_ranges, tailq) {
+			if (bdev_io_range_is_freezed(bdev_io, range)) {
+				TAILQ_INSERT_TAIL(&lvol_ch->queued_io, bdev_io, module_link);
+				return;
+			}
+		}
 	}
+
 	TAILQ_INSERT_TAIL(&lvol_ch->submitted_io, bdev_io, module_link);
 
 	switch (bdev_io->type) {
@@ -1077,6 +1176,9 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
 		lvol_write(lvol, lvol_ch->bs_channel, bdev_io);
+		break;
+	case SPDK_BDEV_IO_TYPE_FLUSH:
+		lvol_flush(bdev_io);
 		break;
 	case SPDK_BDEV_IO_TYPE_RESET:
 		lvol_reset(bdev_io);
@@ -2342,8 +2444,8 @@ vbdev_lvol_get_fragmap(struct spdk_lvol *lvol, uint64_t offset, uint64_t size,
 }
 
 struct quiesce_lvol_ctx {
-	struct freezing_lvol			freezing;
-	struct freezing_lvol			*current_freezing;
+	struct freeze_range			range;
+	struct freeze_range			*current_range;
 	struct spdk_poller			*poller;
 	spdk_lvol_op_with_handle_complete	cb_fn;
 	void					*cb_arg;
@@ -2354,7 +2456,7 @@ _vbdev_lvol_quiesce_error_cleanup_cb(struct spdk_io_channel_iter *i, int status)
 {
 	struct quiesce_lvol_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
 
-	ctx->cb_fn(ctx->cb_arg, ctx->freezing.lvol, -ENOMEM);
+	ctx->cb_fn(ctx->cb_arg, ctx->range.lvol, -ENOMEM);
 	free(ctx);
 }
 
@@ -2364,11 +2466,12 @@ static void
 _vbdev_lvol_quiesce_done(struct spdk_io_channel_iter *i, int status)
 {
 	struct quiesce_lvol_ctx	*ctx = spdk_io_channel_iter_get_ctx(i);
-	struct spdk_lvol	*lvol = ctx->freezing.lvol;
+	struct spdk_lvol	*lvol = ctx->range.lvol;
 
 	if (status == -ENOMEM) {
-		/* One of the channels could not allocate a freezing_lvol object.
-		 * So we have to go back and clean up any freezings that were
+		/*
+		 * One of the channels could not allocate a freeze_range object.
+		 * So we have to go back and clean up any freeze_range that were
 		 * allocated successfully before we return error status to
 		 * the caller. We can reuse the unquiesce function to do that
 		 * clean up.
@@ -2379,11 +2482,11 @@ _vbdev_lvol_quiesce_done(struct spdk_io_channel_iter *i, int status)
 		return;
 	}
 
-	/* All channels have freezed this lvol and no I/O are outstanding */
-	ctx->cb_fn(ctx->cb_arg, ctx->freezing.lvol, status);
+	/* All channels have freezed this range and no I/O are outstanding */
+	ctx->cb_fn(ctx->cb_arg, ctx->range.lvol, status);
 
-	/* Don't free the ctx here. Its freezing is in the lvol's global list of
-	 * ongoing quiescences, and will be removed and freed when this freezing
+	/* Don't free the ctx here. Its range is in the lvol's global list of
+	 * freezed ranges, and will be removed and freed when this range
 	 * is later unfrozen.
 	 */
 }
@@ -2395,19 +2498,18 @@ _vbdev_lvol_quiesce_check_io(void *_i)
 	struct quiesce_lvol_ctx		*ctx = spdk_io_channel_iter_get_ctx(i);
 	struct spdk_io_channel		*channel = spdk_io_channel_iter_get_channel(i);
 	struct spdk_lvol_channel	*lvol_channel = spdk_io_channel_get_ctx(channel);
-	struct freezing_lvol		*freezing = ctx->current_freezing;
+	struct freeze_range		*range = ctx->current_range;
 	struct spdk_bdev_io		*bdev_io;
 
 	spdk_poller_unregister(&ctx->poller);
 
 	/*
-	 * The lvol is now freezed, so no new IO can be submitted to it.
-	 * But we need to wait until any outstanding IO are completed, skipping the current I/O in case the
-	 * quiesce operation is started by a flush bdev_io request. Current I/O can be recognized checking
-	 * for the same channel and the same context of the current quiesce operation.
+	 * The range is now freezed, so no new IO can be submitted to it.
+	 * But we need to wait until any outstanding I/O overlapping with this range are completed,
+	 * skipping the current I/O in case the quiesce operation is started by a bdev_io flush request.
 	 */
 	TAILQ_FOREACH(bdev_io, &lvol_channel->submitted_io, module_link) {
-		if (freezing->owner_ch != channel || freezing->ctx != bdev_io->internal.caller_ctx) {
+		if (bdev_io_range_is_freezed(bdev_io, range)) {
 			ctx->poller = SPDK_POLLER_REGISTER(_vbdev_lvol_quiesce_check_io, i, 100);
 			return SPDK_POLLER_BUSY;
 		}
@@ -2423,15 +2525,17 @@ _vbdev_lvol_quiesce_get_channel(struct spdk_io_channel_iter *i)
 	struct quiesce_lvol_ctx		*ctx = spdk_io_channel_iter_get_ctx(i);
 	struct spdk_io_channel		*channel = spdk_io_channel_iter_get_channel(i);
 	struct spdk_lvol_channel	*lvol_channel = spdk_io_channel_get_ctx(channel);
-	struct freezing_lvol		*freezing;
+	struct freeze_range		*range;
 
-	TAILQ_FOREACH(freezing, &lvol_channel->freezings, tailq) {
-		if (freezing->ctx == ctx->freezing.ctx) {
-			/* The lvol is already freezed on this channel, so don't add
+	TAILQ_FOREACH(range, &lvol_channel->freezed_ranges, tailq) {
+		if (range->offset == ctx->range.offset &&
+		    range->length == ctx->range.length &&
+		    range->freezed_ctx == ctx->range.freezed_ctx) {
+			/* This range already exists on this channel, so don't add
 			 * it again.  This can happen when a new channel is created
 			 * while the for_each_channel operation is in progress.
 			 * Do not check for outstanding I/O in that case, since the
-			 * lvol was freezed before any I/O could be submitted to the
+			 * range was freezed before any I/O could be submitted to the
 			 * new channel.
 			 */
 			spdk_for_each_channel_continue(i, 0);
@@ -2439,19 +2543,20 @@ _vbdev_lvol_quiesce_get_channel(struct spdk_io_channel_iter *i)
 		}
 	}
 
-	freezing = calloc(1, sizeof(*freezing));
-	if (freezing == NULL) {
-		SPDK_ERRLOG("Cannot alloc memory for freezing quiesce channel of lvol %s\n",
-			    ctx->freezing.lvol->name);
+	range = calloc(1, sizeof(*range));
+	if (range == NULL) {
+		SPDK_ERRLOG("Cannot alloc memory for range quiesce channel of lvol %s\n",
+			    ctx->range.lvol->name);
 		spdk_for_each_channel_continue(i, -ENOMEM);
 		return;
 	}
 
-	freezing->lvol = ctx->freezing.lvol;
-	freezing->ctx = ctx->freezing.ctx;
-	freezing->owner_ch = ctx->freezing.owner_ch;
-	ctx->current_freezing = freezing;
-	TAILQ_INSERT_TAIL(&lvol_channel->freezings, freezing, tailq);
+	range->offset = ctx->range.offset;
+	range->length = ctx->range.length;
+	range->freezed_ctx = ctx->range.freezed_ctx;
+	range->owner_ch = ctx->range.owner_ch;
+	ctx->current_range = range;
+	TAILQ_INSERT_TAIL(&lvol_channel->freezed_ranges, range, tailq);
 
 	_vbdev_lvol_quiesce_check_io(i);
 }
@@ -2459,18 +2564,28 @@ _vbdev_lvol_quiesce_get_channel(struct spdk_io_channel_iter *i)
 static void
 _vbdev_lvol_quiesce_ctx(struct spdk_lvol *lvol, struct quiesce_lvol_ctx *ctx)
 {
-	assert(spdk_get_thread() == ctx->freezing.owner_thread);
-	assert(ctx->freezing.owner_ch == NULL ||
-	       spdk_io_channel_get_thread(ctx->freezing.owner_ch) == ctx->freezing.owner_thread);
+	assert(spdk_get_thread() == ctx->range.owner_thread);
+	assert(ctx->range.owner_ch == NULL ||
+	       spdk_io_channel_get_thread(ctx->range.owner_ch) == ctx->range.owner_thread);
 
-	/* We will add a copy of this freezing_lvol to each channel now. */
+	/* We will add a copy of this range to each channel now. */
 	spdk_for_each_channel(lvol, _vbdev_lvol_quiesce_get_channel, ctx, _vbdev_lvol_quiesce_done);
 }
 
-int _vbdev_lvol_quiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
-			spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
+static bool
+lvol_freeze_range_overlaps_tailq(struct freeze_range *range, lvol_freeze_range_tailq_t *tailq)
+{
+	struct freeze_range *r;
 
-int
+	TAILQ_FOREACH(r, tailq, tailq) {
+		if (lvol_freeze_range_overlapped(range, r)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static int
 _vbdev_lvol_quiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
 		    spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
 {
@@ -2482,27 +2597,31 @@ _vbdev_lvol_quiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
 		return -ENOMEM;
 	}
 
-	ctx->freezing.lvol = lvol;
-	ctx->freezing.ctx = cb_arg;
-	ctx->freezing.owner_thread = spdk_get_thread();
+	ctx->range.lvol = lvol;
+	ctx->range.owner_thread = spdk_get_thread();
 	if (bdev_io != NULL) {
-		ctx->freezing.ctx = bdev_io->internal.caller_ctx;
-		ctx->freezing.owner_ch =  spdk_bdev_io_get_io_channel(bdev_io);
+		ctx->range.offset = bdev_io->u.bdev.offset_blocks;
+		ctx->range.length = bdev_io->u.bdev.num_blocks;
+		ctx->range.freezed_ctx = bdev_io->internal.caller_ctx;
+		ctx->range.owner_ch =  spdk_bdev_io_get_io_channel(bdev_io);
+	} else {
+		ctx->range.offset = 0;
+		ctx->range.length = lvol->bdev->blockcnt;
 	}
+
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
 
 	spdk_spin_lock(&lvol->spinlock);
-	if (!TAILQ_EMPTY(&lvol->ongoing_quiescences)) {
+	if (lvol_freeze_range_overlaps_tailq(&ctx->range, &lvol->freezed_ranges)) {
 		/*
-		 * There is an active quiescence on this lvol (currently only one by one
-		 * quiescence can be running, so the list shouldn't be necessary, but maybe
-		 * in the future it could be useful to have multiple different operations).
-		 * Put it on the pending list until lvol isn't quiesced anymore.
+		 * There is an active freezed range overlapping with this range.
+		 * Put it on the pending list until this range no
+		 * longer overlaps with another.
 		 */
-		TAILQ_INSERT_TAIL(&lvol->pending_quiescences, &ctx->freezing, tailq);
+		TAILQ_INSERT_TAIL(&lvol->pending_freezed_ranges, &ctx->range, tailq);
 	} else {
-		TAILQ_INSERT_TAIL(&lvol->ongoing_quiescences, &ctx->freezing, tailq);
+		TAILQ_INSERT_TAIL(&lvol->freezed_ranges, &ctx->range, tailq);
 		_vbdev_lvol_quiesce_ctx(lvol, ctx);
 	}
 	spdk_spin_unlock(&lvol->spinlock);
@@ -2515,7 +2634,7 @@ _vbdev_lvol_quiesce_ctx_msg(void *_ctx)
 {
 	struct quiesce_lvol_ctx *ctx = _ctx;
 
-	_vbdev_lvol_quiesce_ctx(ctx->freezing.lvol, ctx);
+	_vbdev_lvol_quiesce_ctx(ctx->range.lvol, ctx);
 }
 
 static void
@@ -2523,23 +2642,28 @@ _vbdev_lvol_unquiesce_done(struct spdk_io_channel_iter *i, int status)
 {
 	struct quiesce_lvol_ctx	*ctx = spdk_io_channel_iter_get_ctx(i);
 	struct quiesce_lvol_ctx	*queued_ctx;
-	struct spdk_lvol	*lvol = ctx->freezing.lvol;
-	struct freezing_lvol	*freezing, *tmp;
+	struct spdk_lvol	*lvol = ctx->range.lvol;
+	struct freeze_range	*range, *tmp;
 
 	spdk_spin_lock(&lvol->spinlock);
-	/* Check if there are any pending quiesce operations. If there are, calling
-	 * _vbdev_lvol_quiesce_ctx which will start the quiesce process.
+	/* Check if there are any pending freezed ranges that overlap with this range
+	 * that was just unfreezed. If there are, check that it doesn't overlap with any
+	 * other freezed ranges before calling _vbdev_lvol_quiesce_ctx which will start
+	 * the quiesce process.
 	 */
-	TAILQ_FOREACH_SAFE(freezing, &lvol->pending_quiescences, tailq, tmp) {
-		TAILQ_REMOVE(&lvol->pending_quiescences, freezing, tailq);
-		queued_ctx = SPDK_CONTAINEROF(freezing, struct quiesce_lvol_ctx, freezing);
-		TAILQ_INSERT_TAIL(&lvol->ongoing_quiescences, freezing, tailq);
-		spdk_thread_send_msg(queued_ctx->freezing.owner_thread,
-				     _vbdev_lvol_quiesce_ctx_msg, queued_ctx);
+	TAILQ_FOREACH_SAFE(range, &lvol->pending_freezed_ranges, tailq, tmp) {
+		if (lvol_freeze_range_overlapped(range, &ctx->range) &&
+		    !lvol_freeze_range_overlaps_tailq(range, &lvol->freezed_ranges)) {
+			TAILQ_REMOVE(&lvol->pending_freezed_ranges, range, tailq);
+			queued_ctx = SPDK_CONTAINEROF(range, struct quiesce_lvol_ctx, range);
+			TAILQ_INSERT_TAIL(&lvol->freezed_ranges, range, tailq);
+			spdk_thread_send_msg(queued_ctx->range.owner_thread,
+					     _vbdev_lvol_quiesce_ctx_msg, queued_ctx);
+		}
 	}
 	spdk_spin_unlock(&lvol->spinlock);
 
-	ctx->cb_fn(ctx->cb_arg, ctx->freezing.lvol, status);
+	ctx->cb_fn(ctx->cb_arg, ctx->range.lvol, status);
 	free(ctx);
 }
 
@@ -2552,21 +2676,23 @@ _vbdev_lvol_unquiesce_get_channel(struct spdk_io_channel_iter *i)
 	TAILQ_HEAD(, spdk_bdev_io)	queued_io;
 	struct spdk_bdev_io		*bdev_io;
 	struct spdk_io_channel		*bdev_io_channel;
-	struct freezing_lvol		*freezing;
+	struct freeze_range		*range;
 
-	TAILQ_FOREACH(freezing, &lvol_channel->freezings, tailq) {
-		if (ctx->freezing.ctx == freezing->ctx) {
-			TAILQ_REMOVE(&lvol_channel->freezings, freezing, tailq);
-			free(freezing);
+	TAILQ_FOREACH(range, &lvol_channel->freezed_ranges, tailq) {
+		if (ctx->range.offset == range->offset &&
+		    ctx->range.length == range->length &&
+		    ctx->range.freezed_ctx == range->freezed_ctx) {
+			TAILQ_REMOVE(&lvol_channel->freezed_ranges, range, tailq);
+			free(range);
 			break;
 		}
 	}
 
-	/* Note: we should almost always be able to assert that the freezing specified
+	/* Note: we should almost always be able to assert that the range specified
 	 * was found. But there are some very rare corner cases where a new channel
 	 * gets created simultaneously with an unquiesce, where this function
-	 * would execute on that new channel and wouldn't have the freezing.
-	 * We also use this to clean up freezing allocations when a later allocation
+	 * would execute on that new channel and wouldn't have the range.
+	 * We also use this to clean up range allocations when a later allocation
 	 * fails in the quiesce path.
 	 * So we can't actually assert() here.
 	 */
@@ -2584,48 +2710,46 @@ _vbdev_lvol_unquiesce_get_channel(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
-int _vbdev_lvol_unquiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
-			  spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
-
-int
+static int
 _vbdev_lvol_unquiesce(struct spdk_lvol *lvol, struct spdk_bdev_io *bdev_io,
 		      spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
 {
 	struct quiesce_lvol_ctx		*ctx;
-	struct freezing_lvol		*freezing;
+	struct freeze_range		*range;
 	struct spdk_io_channel		*channel = NULL;
 	void				*io_ctx = NULL;
-
-	ctx = calloc(1, sizeof(*ctx));
-	if (ctx == NULL) {
-		SPDK_ERRLOG("Cannot alloc memory for context unquiesce of lvol %s\n", lvol->name);
-		return -ENOMEM;
-	}
+	uint64_t			offset;
+	uint64_t			length;
 
 	if (bdev_io != NULL) {
+		offset = bdev_io->u.bdev.offset_blocks;
+		length = bdev_io->u.bdev.num_blocks;
 		channel = spdk_bdev_io_get_io_channel(bdev_io);
 		io_ctx = bdev_io->internal.caller_ctx;
-	};
+	} else {
+		offset = 0;
+		length = lvol->bdev->blockcnt;
+	}
 
 	spdk_spin_lock(&lvol->spinlock);
-	/* To start the unquiesce process, we find the freezing in the lvol's ongoing_quiescences
-	 * and remove it. This ensures new channels don't inherit the ongoing quiescence.
-	 * Then we will send a message to each channel to remove the freezing from its
+	/* To start the unquiesce process, we find the range in the lvol's freezed_ranges
+	 * and remove it. This ensures new channels don't inherit the freezed range.
+	 * Then we will send a message to each channel to remove the range from its
 	 * per-channel list.
 	 */
-	TAILQ_FOREACH(freezing, &lvol->ongoing_quiescences, tailq) {
-		if (freezing->lvol == lvol && freezing->ctx == io_ctx && freezing->owner_ch == channel) {
+	TAILQ_FOREACH(range, &lvol->freezed_ranges, tailq) {
+		if (range->offset == offset && range->length == length &&
+		    range->freezed_ctx == io_ctx && range->owner_ch == channel) {
 			break;
 		}
 	}
-	if (freezing == NULL) {
-		SPDK_ERRLOG("Cannot execute unquiesce on lvol %s, freezing not found\n", lvol->name);
+	if (range == NULL) {
+		SPDK_ERRLOG("Cannot execute unquiesce on lvol %s, range not found\n", lvol->name);
 		spdk_spin_unlock(&lvol->spinlock);
-		free(ctx);
 		return -EINVAL;
 	}
-	TAILQ_REMOVE(&lvol->ongoing_quiescences, freezing, tailq);
-	ctx = SPDK_CONTAINEROF(freezing, struct quiesce_lvol_ctx, freezing);
+	TAILQ_REMOVE(&lvol->freezed_ranges, range, tailq);
+	ctx = SPDK_CONTAINEROF(range, struct quiesce_lvol_ctx, range);
 	spdk_spin_unlock(&lvol->spinlock);
 
 	ctx->cb_fn = cb_fn;

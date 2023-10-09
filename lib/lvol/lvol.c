@@ -120,8 +120,8 @@ lvol_alloc(struct spdk_lvol_store *lvs, const char *name, bool thin_provision,
 	TAILQ_INSERT_TAIL(&lvs->pending_lvols, lvol, link);
 
 	spdk_spin_init(&lvol->spinlock);
-	TAILQ_INIT(&lvol->ongoing_quiescences);
-	TAILQ_INIT(&lvol->pending_quiescences);
+	TAILQ_INIT(&lvol->freezed_ranges);
+	TAILQ_INIT(&lvol->pending_freezed_ranges);
 
 	return lvol;
 }
@@ -292,8 +292,8 @@ load_next_lvol(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 	}
 
 	spdk_spin_init(&lvol->spinlock);
-	TAILQ_INIT(&lvol->ongoing_quiescences);
-	TAILQ_INIT(&lvol->pending_quiescences);
+	TAILQ_INIT(&lvol->freezed_ranges);
+	TAILQ_INIT(&lvol->pending_freezed_ranges);
 
 	TAILQ_INSERT_TAIL(&lvs->lvols, lvol, link);
 
