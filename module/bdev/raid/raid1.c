@@ -206,6 +206,18 @@ raid1_read_bdev_io_completion(struct spdk_bdev_io *bdev_io, bool success, void *
 	raid_bdev_io_complete(raid_io, SPDK_BDEV_IO_STATUS_SUCCESS);
 }
 
+static void
+raid1_flush_bdev_io_completion(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct raid_bdev_io *raid_io = cb_arg;
+
+	spdk_bdev_free_io(bdev_io);
+
+	raid_bdev_io_complete_part(raid_io, 1, success ?
+				   SPDK_BDEV_IO_STATUS_SUCCESS :
+				   SPDK_BDEV_IO_STATUS_FAILED);
+}
+
 static void raid1_submit_rw_request(struct raid_bdev_io *raid_io);
 
 static void
@@ -338,6 +350,91 @@ raid1_submit_rw_request(struct raid_bdev_io *raid_io)
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
 		ret = raid1_submit_write_request(raid_io);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	if (spdk_unlikely(ret != 0)) {
+		raid_bdev_io_complete(raid_io, SPDK_BDEV_IO_STATUS_FAILED);
+	}
+}
+
+static void raid1_submit_null_payload_request(struct raid_bdev_io *raid_io);
+
+static void
+_raid1_submit_null_payload_request(void *_raid_io)
+{
+	struct raid_bdev_io *raid_io = _raid_io;
+
+	raid1_submit_null_payload_request(raid_io);
+}
+
+static int
+raid1_submit_flush_request(struct raid_bdev_io *raid_io)
+{
+	struct raid_bdev *raid_bdev = raid_io->raid_bdev;
+	struct spdk_bdev_io *bdev_io = spdk_bdev_io_from_ctx(raid_io);
+	struct raid_base_bdev_info *base_info;
+	struct spdk_io_channel *base_ch;
+	uint64_t pd_lba, pd_blocks;
+	uint8_t idx;
+	uint64_t base_bdev_io_not_submitted;
+	int ret = 0;
+
+	pd_lba = bdev_io->u.bdev.offset_blocks;
+	pd_blocks = bdev_io->u.bdev.num_blocks;
+
+	if (raid_io->base_bdev_io_submitted == 0) {
+		raid_io->base_bdev_io_remaining = raid_bdev->num_base_bdevs;
+	}
+
+	for (idx = raid_io->base_bdev_io_submitted; idx < raid_bdev->num_base_bdevs; idx++) {
+		base_info = &raid_bdev->base_bdev_info[idx];
+		base_ch = raid_bdev_channel_get_base_channel(raid_io->raid_ch, idx);
+
+		if (base_ch == NULL) {
+			raid_io->base_bdev_io_submitted++;
+			raid_bdev_io_complete_part(raid_io, 1, SPDK_BDEV_IO_STATUS_SUCCESS);
+			continue;
+		}
+
+		ret = raid_bdev_flush_blocks(base_info, base_ch, pd_lba, pd_blocks,
+					     raid1_flush_bdev_io_completion, raid_io);
+		if (spdk_unlikely(ret != 0)) {
+			if (spdk_unlikely(ret == -ENOMEM)) {
+				raid_bdev_queue_io_wait(raid_io, spdk_bdev_desc_get_bdev(base_info->desc),
+							base_ch, _raid1_submit_null_payload_request);
+				return 0;
+			}
+
+			base_bdev_io_not_submitted = raid_bdev->num_base_bdevs -
+						     raid_io->base_bdev_io_submitted;
+			raid_bdev_io_complete_part(raid_io, base_bdev_io_not_submitted,
+						   SPDK_BDEV_IO_STATUS_FAILED);
+			return 0;
+		}
+
+		raid_io->base_bdev_io_submitted++;
+	}
+
+	if (raid_io->base_bdev_io_submitted == 0) {
+		ret = -ENODEV;
+	}
+
+	return ret;
+}
+
+static void
+raid1_submit_null_payload_request(struct raid_bdev_io *raid_io)
+{
+	struct spdk_bdev_io *bdev_io = spdk_bdev_io_from_ctx(raid_io);
+	int ret;
+
+	switch (bdev_io->type) {
+	case SPDK_BDEV_IO_TYPE_FLUSH:
+		ret = raid1_submit_flush_request(raid_io);
 		break;
 	default:
 		ret = -EINVAL;
@@ -577,6 +674,7 @@ static struct raid_bdev_module g_raid1_module = {
 	.start = raid1_start,
 	.stop = raid1_stop,
 	.submit_rw_request = raid1_submit_rw_request,
+	.submit_null_payload_request = raid1_submit_null_payload_request,
 	.get_io_channel = raid1_get_io_channel,
 	.submit_process_request = raid1_submit_process_request,
 	.resize = raid1_resize,
