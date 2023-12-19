@@ -162,6 +162,8 @@ blob_insert_cluster(struct spdk_blob *blob, uint32_t cluster_num, uint64_t clust
 	}
 
 	*cluster_lba = bs_cluster_to_lba(blob->bs, cluster);
+	blob->active.num_allocated_clusters++;
+
 	return 0;
 }
 
@@ -546,6 +548,7 @@ blob_mark_clean(struct spdk_blob *blob)
 	blob->clean.extent_pages = blob->active.extent_pages;
 	blob->clean.num_clusters = blob->active.num_clusters;
 	blob->clean.clusters = blob->active.clusters;
+	blob->clean.num_allocated_clusters = blob->active.num_allocated_clusters;
 	blob->clean.num_pages = blob->active.num_pages;
 	blob->clean.pages = blob->active.pages;
 
@@ -700,6 +703,7 @@ blob_parse_page(const struct spdk_blob_md_page *page, struct spdk_blob *blob)
 					if (desc_extent_rle->extents[i].cluster_idx != 0) {
 						blob->active.clusters[blob->active.num_clusters++] = bs_cluster_to_lba(blob->bs,
 								desc_extent_rle->extents[i].cluster_idx + j);
+						blob->active.num_allocated_clusters++;
 					} else if (spdk_blob_is_thin_provisioned(blob)) {
 						blob->active.clusters[blob->active.num_clusters++] = 0;
 					} else {
@@ -817,6 +821,7 @@ blob_parse_page(const struct spdk_blob_md_page *page, struct spdk_blob *blob)
 				if (desc_extent->cluster_idx[i] != 0) {
 					blob->active.clusters[blob->active.num_clusters++] = bs_cluster_to_lba(blob->bs,
 							desc_extent->cluster_idx[i]);
+					blob->active.num_allocated_clusters++;
 				} else if (spdk_blob_is_thin_provisioned(blob)) {
 					blob->active.clusters[blob->active.num_clusters++] = 0;
 				} else {
@@ -1930,6 +1935,7 @@ blob_persist_clear_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserr
 		free(blob->active.clusters);
 		blob->active.clusters = NULL;
 		blob->active.cluster_array_size = 0;
+		blob->active.num_allocated_clusters = 0;
 	} else if (blob->active.num_clusters != blob->active.cluster_array_size) {
 #ifndef __clang_analyzer__
 		void *tmp;
@@ -2250,6 +2256,13 @@ blob_resize(struct spdk_blob *blob, uint64_t sz)
 			 * bs_allocate_cluster will just start at that index
 			 * to find the next free md_page when needed.
 			 */
+		}
+	}
+
+	/* If we are shrinking the blob, we must adjust num_allocated_clusters */
+	for (i = sz; i < num_clusters; i++) {
+		if (blob->active.clusters[i] != 0) {
+			blob->active.num_allocated_clusters--;
 		}
 	}
 
@@ -3945,6 +3958,8 @@ bs_delete_corrupted_blob(void *cb_arg, int bserrno)
 	for (i = 0; i < ctx->blob->active.num_extent_pages; i++) {
 		ctx->blob->active.extent_pages[i] = 0;
 	}
+
+	ctx->blob->active.num_allocated_clusters = 0;
 
 	ctx->blob->md_ro = false;
 
@@ -5886,6 +5901,14 @@ spdk_blob_get_num_clusters(struct spdk_blob *blob)
 	return blob->active.num_clusters;
 }
 
+uint64_t
+spdk_blob_get_num_allocated_clusters(struct spdk_blob *blob)
+{
+	assert(blob != NULL);
+
+	return blob->active.num_allocated_clusters;
+}
+
 static uint64_t
 blob_find_io_unit(struct spdk_blob *blob, uint64_t offset, bool is_allocated)
 {
@@ -6279,11 +6302,16 @@ static void
 bs_snapshot_swap_cluster_maps(struct spdk_blob *blob1, struct spdk_blob *blob2)
 {
 	uint64_t *cluster_temp;
+	uint64_t num_allocated_clusters_temp;
 	uint32_t *extent_page_temp;
 
 	cluster_temp = blob1->active.clusters;
 	blob1->active.clusters = blob2->active.clusters;
 	blob2->active.clusters = cluster_temp;
+
+	num_allocated_clusters_temp = blob1->active.num_allocated_clusters;
+	blob1->active.num_allocated_clusters = blob2->active.num_allocated_clusters;
+	blob2->active.num_allocated_clusters = num_allocated_clusters_temp;
 
 	extent_page_temp = blob1->active.extent_pages;
 	blob1->active.extent_pages = blob2->active.extent_pages;
@@ -7492,6 +7520,9 @@ delete_snapshot_sync_clone_cpl(void *cb_arg, int bserrno)
 	/* Clear cluster map entries for snapshot */
 	for (i = 0; i < ctx->snapshot->active.num_clusters && i < ctx->clone->active.num_clusters; i++) {
 		if (ctx->clone->active.clusters[i] == ctx->snapshot->active.clusters[i]) {
+			if (ctx->snapshot->active.clusters[i] != 0) {
+				ctx->snapshot->active.num_allocated_clusters--;
+			}
 			ctx->snapshot->active.clusters[i] = 0;
 		}
 	}
@@ -7613,6 +7644,9 @@ delete_snapshot_sync_snapshot_xattr_cpl(void *cb_arg, int bserrno)
 	for (i = 0; i < ctx->snapshot->active.num_clusters && i < ctx->clone->active.num_clusters; i++) {
 		if (ctx->clone->active.clusters[i] == 0) {
 			ctx->clone->active.clusters[i] = ctx->snapshot->active.clusters[i];
+			if (ctx->clone->active.clusters[i] != 0) {
+				ctx->clone->active.num_allocated_clusters++;
+			}
 		}
 	}
 	ctx->next_extent_page = 0;
