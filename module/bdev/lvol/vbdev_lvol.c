@@ -1366,7 +1366,7 @@ _vbdev_lvol_set_xattr_cb(void *cb_arg, int lvolerrno)
 	struct spdk_lvol_req *req = cb_arg;
 
 	if (lvolerrno != 0) {
-		SPDK_ERRLOG("Setting xattr failed\n");
+		SPDK_ERRLOG("Setting xattr failed: error %d\n", lvolerrno);
 	}
 
 	req->cb_fn(req->cb_arg, lvolerrno);
