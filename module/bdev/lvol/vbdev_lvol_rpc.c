@@ -384,18 +384,76 @@ SPDK_RPC_REGISTER("bdev_lvol_create", rpc_bdev_lvol_create, SPDK_RPC_RUNTIME)
 struct rpc_bdev_lvol_snapshot {
 	char *lvol_name;
 	char *snapshot_name;
+	char **xattrs;
 };
+
+static void
+bdev_lvol_snapshot_free_xattrs(char **xattrs)
+{
+	char **entry;
+
+	if (xattrs) {
+		for (entry = xattrs; *entry; entry++) {
+			free(*entry);
+		}
+		free(xattrs);
+	}
+}
 
 static void
 free_rpc_bdev_lvol_snapshot(struct rpc_bdev_lvol_snapshot *req)
 {
 	free(req->lvol_name);
 	free(req->snapshot_name);
+	bdev_lvol_snapshot_free_xattrs(req->xattrs);
+}
+
+static int
+bdev_lvol_snapshot_decode_xattrs(const struct spdk_json_val *values, void *out)
+{
+	char ***map = out;
+	char **entry;
+	uint32_t i;
+
+	if (values->type == SPDK_JSON_VAL_NULL) {
+		/* treated like empty object: empty xattrs */
+		*map = calloc(1, sizeof(**map));
+		if (!*map) {
+			return -1;
+		}
+		return 0;
+	}
+
+	if (values->type != SPDK_JSON_VAL_OBJECT_BEGIN) {
+		return -1;
+	}
+
+	*map = calloc(values->len + 1, sizeof(**map));
+	if (!*map) {
+		return -1;
+	}
+
+	for (i = 0, entry = *map; i < values->len;) {
+		const struct spdk_json_val *name = &values[i + 1];
+		const struct spdk_json_val *v = &values[i + 2];
+		/* Here we catch errors like invalid types. */
+		if (!(entry[0] = spdk_json_strdup(name)) ||
+		    !(entry[1] = spdk_json_strdup(v))) {
+			bdev_lvol_snapshot_free_xattrs(*map);
+			*map = NULL;
+			return -1;
+		}
+		i += 1 + spdk_json_val_len(v);
+		entry += 2;
+	}
+
+	return 0;
 }
 
 static const struct spdk_json_object_decoder rpc_bdev_lvol_snapshot_decoders[] = {
 	{"lvol_name", offsetof(struct rpc_bdev_lvol_snapshot, lvol_name), spdk_json_decode_string},
 	{"snapshot_name", offsetof(struct rpc_bdev_lvol_snapshot, snapshot_name), spdk_json_decode_string},
+	{"xattrs", offsetof(struct rpc_bdev_lvol_snapshot, xattrs), bdev_lvol_snapshot_decode_xattrs, true},
 };
 
 static void
@@ -425,6 +483,7 @@ rpc_bdev_lvol_snapshot(struct spdk_jsonrpc_request *request,
 	struct rpc_bdev_lvol_snapshot req = {};
 	struct spdk_bdev *bdev;
 	struct spdk_lvol *lvol;
+	size_t count = 0;
 
 	SPDK_INFOLOG(lvol_rpc, "Snapshotting blob\n");
 
@@ -451,7 +510,13 @@ rpc_bdev_lvol_snapshot(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	vbdev_lvol_create_snapshot(lvol, req.snapshot_name, NULL, 0, rpc_bdev_lvol_snapshot_cb, request);
+	if (req.xattrs) {
+		for (; req.xattrs[count]; count++) {}
+	}
+
+	vbdev_lvol_create_snapshot(lvol, req.snapshot_name,
+				   (const char *const *)req.xattrs, count,
+				   rpc_bdev_lvol_snapshot_cb, request);
 
 cleanup:
 	free_rpc_bdev_lvol_snapshot(&req);

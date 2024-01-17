@@ -169,6 +169,7 @@ bdev_lvol_snapshot [-h] lvol_name snapshot_name
     Create a snapshot with snapshot_name of a given lvol bdev.
     optional arguments:
     -h, --help  show help
+    --xattr adds a key=value xattr to the snapshot.
 bdev_lvol_clone [-h] snapshot_name clone_name
     Create a clone with clone_name of a given lvol snapshot.
     optional arguments:

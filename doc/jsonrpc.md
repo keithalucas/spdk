@@ -10608,6 +10608,7 @@ Name                    | Optional | Type        | Description
 ----------------------- | -------- | ----------- | -----------
 lvol_name               | Required | string      | UUID or alias of the logical volume to create a snapshot from
 snapshot_name           | Required | string      | Name for the newly created snapshot
+xattrs                  | Optional | string map  | Xattrs for the newly created snapshot
 
 #### Response
 
@@ -10624,7 +10625,11 @@ Example request:
   "id": 1,
   "params": {
     "lvol_name": "1b38702c-7f0c-411e-a962-92c6a5a8a602",
-    "snapshot_name": "SNAP1"
+    "snapshot_name": "SNAP1",
+    "xattrs": {
+      "snapshot_timestamp": "2024-01-16T16:06:46Z",
+      "user_created": "true",
+    }
   }
 }
 ~~~
