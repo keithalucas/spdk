@@ -886,6 +886,13 @@ spdk_lvol_create_snapshot(struct spdk_lvol *lvol, const char *snapshot_name,
 }
 
 void
+spdk_lvol_create_snapshot_with_xattrs(struct spdk_lvol *lvol, const char *snapshot_name,
+				      const char *const *xattrs, size_t xattrs_num,
+				      spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
+{
+}
+
+void
 spdk_lvol_create_clone(struct spdk_lvol *lvol, const char *clone_name,
 		       spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
 {

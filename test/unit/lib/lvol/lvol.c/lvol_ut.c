@@ -1595,6 +1595,98 @@ lvol_snapshot_fail(void)
 }
 
 static void
+lvol_snapshot_xattr(void)
+{
+	struct lvol_ut_bs_dev dev;
+	struct spdk_lvol *lvol, *snap;
+	struct spdk_lvs_opts opts;
+	int rc = 0;
+	char *xattrs[] = {"snapshot_timestamp", "2024-01-16T16:06:46Z", "user_created", "true"};
+	char *xattrs_bad[] = {"snapshot_timestamp"};
+	const char *value = NULL;
+	size_t value_len = 0;
+	struct xattrs_ctx xattr_ctx;
+
+	init_dev(&dev);
+
+	spdk_lvs_opts_init(&opts);
+	snprintf(opts.name, sizeof(opts.name), "lvs");
+
+	g_lvserrno = -1;
+	rc = spdk_lvs_init(&dev.bs_dev, &opts, lvol_store_op_with_handle_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol_store != NULL);
+
+	spdk_lvol_create(g_lvol_store, "lvol", 10, true, LVOL_CLEAR_WITH_DEFAULT,
+			 lvol_op_with_handle_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
+
+	lvol = g_lvol;
+
+	/* Without xattrs, fallback over spdk_lvol_create_snapshot */
+	spdk_lvol_create_snapshot_with_xattrs(lvol, "snap", NULL, 0, lvol_op_with_handle_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
+	CU_ASSERT_STRING_EQUAL(g_lvol->name, "snap");
+
+	snap = g_lvol;
+
+	/* Should be able to look up name */
+	xattr_ctx.newlvol = lvol;
+	xattr_ctx.xattrs_external = (char **)&xattrs;
+	lvol_get_xattr_value_ext(&xattr_ctx, "name", (const void **)&value, &value_len);
+	CU_ASSERT(value != NULL && strcmp(value, "lvol") == 0);
+	CU_ASSERT(value_len != 0);
+
+	/* With a bad xattrs list */
+	g_lvol = NULL;
+	spdk_lvol_create_snapshot_with_xattrs(lvol, "snap_x", (const char *const *)&xattrs_bad, 1,
+					      lvol_op_with_handle_complete, NULL);
+	CU_ASSERT(g_lvserrno == -EINVAL);
+	CU_ASSERT(g_lvol == NULL);
+
+	/* With a valid xattr list */
+	spdk_lvol_create_snapshot_with_xattrs(lvol, "snap_x", (const char *const *)&xattrs, 4,
+					      lvol_op_with_handle_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	CU_ASSERT(g_lvol != NULL);
+	CU_ASSERT_STRING_EQUAL(g_lvol->name, "snap_x");
+
+	/* Should be able to look up name, snapshot_timestamp and user_created */
+	lvol_get_xattr_value_ext(&xattr_ctx, "name", (const void **)&value, &value_len);
+	CU_ASSERT(value != NULL && strcmp(value, "lvol") == 0);
+	CU_ASSERT(value_len != 0);
+	lvol_get_xattr_value_ext(&xattr_ctx, "snapshot_timestamp", (const void **)&value, &value_len);
+	CU_ASSERT(value != NULL && strcmp(value, "2024-01-16T16:06:46Z") == 0);
+	CU_ASSERT(value_len != 0);
+	lvol_get_xattr_value_ext(&xattr_ctx, "user_created", (const void **)&value, &value_len);
+	CU_ASSERT(value != NULL && strcmp(value, "true") == 0);
+	CU_ASSERT(value_len != 0);
+
+	/* Lvols has to be closed (or destroyed) before unloading lvol store. */
+	spdk_lvol_close(g_lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	g_lvserrno = -1;
+
+	spdk_lvol_close(snap, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	g_lvserrno = -1;
+
+	spdk_lvol_close(lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	g_lvserrno = -1;
+
+	rc = spdk_lvs_unload(g_lvol_store, op_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	g_lvol_store = NULL;
+
+	free_dev(&dev);
+}
+
+static void
 lvol_clone(void)
 {
 	struct lvol_ut_bs_dev dev;
@@ -3408,6 +3500,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, lvol_open);
 	CU_ADD_TEST(suite, lvol_snapshot);
 	CU_ADD_TEST(suite, lvol_snapshot_fail);
+	CU_ADD_TEST(suite, lvol_snapshot_xattr);
 	CU_ADD_TEST(suite, lvol_clone);
 	CU_ADD_TEST(suite, lvol_clone_fail);
 	CU_ADD_TEST(suite, lvol_iter_clones);
