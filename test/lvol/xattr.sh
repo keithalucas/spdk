@@ -39,6 +39,11 @@ function test_set_xattr() {
 	snapshot_uuid=$(rpc_cmd bdev_lvol_snapshot lvs_test/lvol_test lvol_snapshot)
 	NOT rpc_cmd bdev_lvol_set_xattr "$snapshot_uuid" "foo" "bar"
 
+	# Create snapshot with xattr
+	snapshotx_uuid=$(rpc_cmd bdev_lvol_snapshot --xattr snapshot_timestamp=2024-01-16T16:06:46Z lvs_test/lvol_test lvol_snapshotx)
+	value=$(rpc_cmd bdev_lvol_get_xattr "$snapshotx_uuid" "snapshot_timestamp")
+	[ "\"2024-01-16T16:06:46Z\"" = "$value" ]
+
 	rpc_cmd bdev_lvol_delete_lvstore -u "$lvs_uuid"
 	rpc_cmd bdev_malloc_delete "$malloc_name"
 	check_leftover_devices
