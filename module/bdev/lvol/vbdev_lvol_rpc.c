@@ -454,7 +454,7 @@ rpc_bdev_lvol_snapshot(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	vbdev_lvol_create_snapshot(lvol, req.snapshot_name, rpc_bdev_lvol_snapshot_cb, request);
+	vbdev_lvol_create_snapshot(lvol, req.snapshot_name, NULL, 0, rpc_bdev_lvol_snapshot_cb, request);
 
 cleanup:
 	free_rpc_bdev_lvol_snapshot(&req);
