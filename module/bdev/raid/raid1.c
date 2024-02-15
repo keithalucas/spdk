@@ -218,6 +218,18 @@ raid1_flush_bdev_io_completion(struct spdk_bdev_io *bdev_io, bool success, void 
 				   SPDK_BDEV_IO_STATUS_FAILED);
 }
 
+static void
+raid1_unmap_bdev_io_completion(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct raid_bdev_io *raid_io = cb_arg;
+
+	spdk_bdev_free_io(bdev_io);
+
+	raid_bdev_io_complete_part(raid_io, 1, success ?
+				   SPDK_BDEV_IO_STATUS_SUCCESS :
+				   SPDK_BDEV_IO_STATUS_FAILED);
+}
+
 static void raid1_submit_rw_request(struct raid_bdev_io *raid_io);
 
 static void
@@ -372,7 +384,7 @@ _raid1_submit_null_payload_request(void *_raid_io)
 }
 
 static int
-raid1_submit_flush_request(struct raid_bdev_io *raid_io)
+submit_null_payload_request(struct raid_bdev_io *raid_io)
 {
 	struct raid_bdev *raid_bdev = raid_io->raid_bdev;
 	struct spdk_bdev_io *bdev_io = spdk_bdev_io_from_ctx(raid_io);
@@ -400,8 +412,21 @@ raid1_submit_flush_request(struct raid_bdev_io *raid_io)
 			continue;
 		}
 
-		ret = raid_bdev_flush_blocks(base_info, base_ch, pd_lba, pd_blocks,
-					     raid1_flush_bdev_io_completion, raid_io);
+		switch (bdev_io->type) {
+		case SPDK_BDEV_IO_TYPE_UNMAP:
+			ret = raid_bdev_unmap_blocks(base_info, base_ch,
+						     pd_lba, pd_blocks,
+						     raid1_unmap_bdev_io_completion, raid_io);
+			break;
+		case SPDK_BDEV_IO_TYPE_FLUSH:
+			ret = raid_bdev_flush_blocks(base_info, base_ch,
+						     pd_lba, pd_blocks,
+						     raid1_flush_bdev_io_completion, raid_io);
+			break;
+		default:
+			SPDK_ERRLOG("submit request, invalid io type with null payload %u\n", bdev_io->type);
+			ret = -EIO;
+		}
 		if (spdk_unlikely(ret != 0)) {
 			if (spdk_unlikely(ret == -ENOMEM)) {
 				raid_bdev_queue_io_wait(raid_io, spdk_bdev_desc_get_bdev(base_info->desc),
@@ -429,17 +454,7 @@ raid1_submit_flush_request(struct raid_bdev_io *raid_io)
 static void
 raid1_submit_null_payload_request(struct raid_bdev_io *raid_io)
 {
-	struct spdk_bdev_io *bdev_io = spdk_bdev_io_from_ctx(raid_io);
-	int ret;
-
-	switch (bdev_io->type) {
-	case SPDK_BDEV_IO_TYPE_FLUSH:
-		ret = raid1_submit_flush_request(raid_io);
-		break;
-	default:
-		ret = -EINVAL;
-		break;
-	}
+	int ret = submit_null_payload_request(raid_io);
 
 	if (spdk_unlikely(ret != 0)) {
 		raid_bdev_io_complete(raid_io, SPDK_BDEV_IO_STATUS_FAILED);
