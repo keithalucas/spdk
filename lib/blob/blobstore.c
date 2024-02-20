@@ -2659,6 +2659,11 @@ blob_free_cluster_cpl(void *cb_arg, int bserrno)
 {
 	struct spdk_blob_free_cluster_ctx *ctx = cb_arg;
 	spdk_bs_sequence_t *seq = ctx->seq;
+	struct spdk_blob *blob = ctx->blob;
+
+	if (blob != NULL) {
+		blob->active.num_allocated_clusters--;
+	}
 
 	bs_sequence_finish(seq, bserrno);
 
