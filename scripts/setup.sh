@@ -18,7 +18,7 @@ source "$rootdir/scripts/common.sh"
 
 function usage() {
 	if [[ $os == Linux ]]; then
-		options="[config|reset|status|cleanup|interactive|help]"
+		options="[config|reset|status|disk-status|disk-driver|bind|unbind|cleanup|interactive|help]"
 	else
 		options="[config|reset|interactive|help]"
 	fi
@@ -43,6 +43,10 @@ function usage() {
 	echo "                  Hugepage memory size will remain unchanged."
 	if [[ $os == Linux ]]; then
 		echo "status            Print status of all SPDK-compatible devices on the system."
+		echo "disk-status       Print status of a specific SPDK-compatible device on the system."
+		echo "disk-driver       Print driver name associated with a given PCI device's BDF address."
+		echo "bind              Bind a PCI device to a specific driver."
+		echo "unbind            Unbind a PCI device from its current driver and rebind it to the original driver."
 	fi
 	echo "interactive       Executes script in interactive mode."
 	echo "help              Print this help message."
@@ -706,6 +710,60 @@ function status_linux() {
 	done
 }
 
+function disk_status_linux() {
+	local target_bdf="$1"
+
+	if [[ -z $target_bdf ]]; then
+		echo "No BDF specified" >&2
+		return 1
+	fi
+
+	sorted_bdfs=($(printf '%s\n' "${!all_devices_d[@]}" | sort))
+
+	for bdf in "${sorted_bdfs[@]}"; do
+		if [ "$bdf" = "$target_bdf" ]; then
+			driver=${drivers_d["$bdf"]}
+			if [ "$numa_nodes" = "0" ]; then
+				node="-"
+			else
+				node=$(cat /sys/bus/pci/devices/$bdf/numa_node)
+				if ((node == -1)); then
+					node=unknown
+				fi
+			fi
+			if [ "$driver" = "nvme" ] && [ -d /sys/bus/pci/devices/$bdf/nvme ]; then
+				name=$(ls /sys/bus/pci/devices/$bdf/nvme)
+			else
+				name="-"
+			fi
+
+			if [[ -n ${nvme_d["$bdf"]} || -n ${virtio_d["$bdf"]} ]]; then
+				blknames=($(get_block_dev_from_bdf "$bdf"))
+			else
+				blknames=("-")
+			fi
+
+			desc=""
+			desc=${desc:-${nvme_d["$bdf"]:+NVMe}}
+			desc=${desc:-${ioat_d["$bdf"]:+I/OAT}}
+			desc=${desc:-${dsa_d["$bdf"]:+DSA}}
+			desc=${desc:-${iaa_d["$bdf"]:+IAA}}
+			desc=${desc:-${virtio_d["$bdf"]:+virtio}}
+			desc=${desc:-${vmd_d["$bdf"]:+VMD}}
+
+			local json_string="{\"bdf\":\"$bdf\", \
+				\"type\":\"$desc\", \
+				\"driver\":\"${driver:--}\", \
+				\"vendor\":\"${pci_ids_vendor["$bdf"]#0x}\", \
+				\"numa\":\"$node\", \
+				\"device\":\"${name:-}\", \
+				\"block_devices\":\"${blknames[*]:--}\"}"
+			formatted=$(echo "$json_string" | jq -c '.')
+			echo "$formatted"
+		fi
+	done
+}
+
 function status_freebsd() {
 	local pci
 
@@ -860,6 +918,61 @@ function set_hp() {
 	NRHUGE=${NRHUGE:-$(((HUGEMEM + HUGEPGSZ_MB - 1) / HUGEPGSZ_MB))}
 }
 
+function bind_linux() {
+	local driver_name=${DRIVER_OVERRIDE}
+
+	if [[ -z $driver_name ]]; then
+		echo "No driver specified, aborting"
+		return 1
+	fi
+
+	for bdf in "${!all_devices_d[@]}"; do
+		if ((all_devices_d["$bdf"] == 0)); then
+			if [[ -n ${nvme_d["$bdf"]} ]]; then
+				# Some nvme controllers may take significant amount of time while being
+				# unbound from the driver. Put that task into background to speed up the
+				# whole process. Currently this is done only for the devices bound to the
+				# nvme driver as other, i.e., ioatdma's, trigger a kernel BUG when being
+				# unbound in parallel. See https://bugzilla.kernel.org/show_bug.cgi?id=209041.
+				linux_bind_driver "$bdf" "$driver_name" &
+			else
+				linux_bind_driver "$bdf" "$driver_name"
+			fi
+		fi
+	done
+	wait
+
+	echo "1" > "/sys/bus/pci/rescan"
+}
+
+function unbind_linux() {
+	bdf=$1
+	if [[ -z $bdf ]]; then
+		echo "No BDF specified, aborting"
+		return 1
+	fi
+
+	driver=$(collect_driver "$bdf")
+	if [[ -n $driver ]] && ! check_for_driver "$driver"; then
+		linux_bind_driver "$bdf" "$driver"
+	else
+		linux_unbind_driver "$bdf"
+	fi
+
+	echo "1" > "/sys/bus/pci/rescan"
+}
+
+function disk_driver_linux() {
+	bdf=$1
+	if [[ -z $bdf ]]; then
+		echo "No BDF specified, aborting"
+		return 1
+	fi
+
+	driver=$(collect_driver "$bdf")
+	jq -n --arg key "device_driver" --arg value "$driver" '{($key): $value}'
+}
+
 kmsg "spdk: $0 $* (start)"
 
 CMD=reset cache_pci_bus
@@ -935,6 +1048,14 @@ if [[ $os == Linux ]]; then
 		reset_linux
 	elif [ "$mode" == "status" ]; then
 		status_linux
+	elif [ "$mode" == "disk-status" ]; then
+		disk_status_linux "$2"
+	elif [ "$mode" == "disk-driver" ]; then
+		disk_driver_linux "$2"
+	elif [ "$mode" == "bind" ]; then
+		bind_linux
+	elif [ "$mode" == "unbind" ]; then
+		unbind_linux "$2"
 	elif [ "$mode" == "help" ]; then
 		usage $0
 	else
