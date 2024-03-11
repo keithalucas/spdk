@@ -33,6 +33,9 @@ struct raid_bdev_io_channel {
 	/* Array of IO channels of base bdevs */
 	struct spdk_io_channel	**base_channel;
 
+	/* Number of IO channels */
+	uint8_t			num_channels;
+
 	/* Private raid module IO channel */
 	struct spdk_io_channel	*module_channel;
 
@@ -135,6 +138,12 @@ raid_bdev_channel_get_module_ctx(struct raid_bdev_io_channel *raid_ch)
 	assert(raid_ch->module_channel != NULL);
 
 	return spdk_io_channel_get_ctx(raid_ch->module_channel);
+}
+
+uint8_t
+raid_bdev_channel_get_num_channels(struct raid_bdev_io_channel *raid_ch)
+{
+	return raid_ch->num_channels;
 }
 
 static uint8_t
@@ -258,6 +267,7 @@ raid_bdev_create_cb(void *io_device, void *ctx_buf)
 	assert(raid_bdev != NULL);
 	assert(raid_bdev->state == RAID_BDEV_STATE_ONLINE);
 
+	raid_ch->num_channels = raid_bdev->num_base_bdevs;
 	raid_ch->base_channel = calloc(raid_bdev->num_base_bdevs, sizeof(struct spdk_io_channel *));
 	if (!raid_ch->base_channel) {
 		SPDK_ERRLOG("Unable to allocate base bdevs io channel\n");
@@ -1657,9 +1667,13 @@ raid_bdev_configure(struct raid_bdev *raid_bdev)
 {
 	int rc;
 
-	assert(raid_bdev->state == RAID_BDEV_STATE_CONFIGURING);
 	assert(raid_bdev->num_base_bdevs_discovered == raid_bdev->num_base_bdevs_operational);
 	assert(raid_bdev->bdev.blocklen > 0);
+
+	/* Check if raid is already configured: it is true in the case we are growing the raid */
+	if (raid_bdev->state == RAID_BDEV_STATE_ONLINE) {
+		return 0;
+	}
 
 	/* The strip_size_kb is read in from user in KB. Convert to blocks here for
 	 * internal use.
@@ -1769,9 +1783,12 @@ raid_bdev_find_base_info_by_bdev(struct spdk_bdev *base_bdev)
 static void
 raid_bdev_remove_base_bdev_done(struct raid_base_bdev_info *base_info, int status)
 {
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
 	assert(base_info->remove_scheduled);
 
 	base_info->remove_scheduled = false;
+	raid_bdev->base_bdev_updating = false;
 	if (base_info->remove_cb != NULL) {
 		base_info->remove_cb(base_info->remove_cb_ctx, status);
 	}
@@ -1989,6 +2006,12 @@ _raid_bdev_remove_base_bdev(struct raid_base_bdev_info *base_info,
 		return -ENODEV;
 	}
 
+	if (raid_bdev->base_bdev_updating == true) {
+		SPDK_ERRLOG("Another operation is in progress.\n");
+		return -EBUSY;
+	}
+	raid_bdev->base_bdev_updating = true;
+
 	assert(base_info->desc);
 	base_info->remove_scheduled = true;
 	base_info->remove_cb = cb_fn;
@@ -2003,6 +2026,7 @@ _raid_bdev_remove_base_bdev(struct raid_base_bdev_info *base_info,
 		 * base bdevs, only the number of discovered base bdevs.
 		 */
 		raid_bdev_free_base_bdev_resource(base_info);
+		raid_bdev->base_bdev_updating = false;
 		if (raid_bdev->num_base_bdevs_discovered == 0) {
 			/* There is no base bdev for this raid, so free the raid device. */
 			raid_bdev_cleanup_and_free(raid_bdev);
@@ -2013,6 +2037,7 @@ _raid_bdev_remove_base_bdev(struct raid_base_bdev_info *base_info,
 		 * to keep the raid bdev operational.
 		 */
 		raid_bdev_deconfigure(raid_bdev, cb_fn, cb_ctx);
+		raid_bdev->base_bdev_updating = false;
 	} else if (raid_bdev->process != NULL) {
 		ret = raid_bdev_process_base_bdev_remove(raid_bdev->process, base_info);
 	} else {
@@ -2021,6 +2046,7 @@ _raid_bdev_remove_base_bdev(struct raid_base_bdev_info *base_info,
 
 	if (ret != 0) {
 		base_info->remove_scheduled = false;
+		raid_bdev->base_bdev_updating = false;
 	}
 	return ret;
 }
@@ -2798,7 +2824,7 @@ static void
 raid_bdev_configure_base_bdev_cont(struct raid_base_bdev_info *base_info)
 {
 	struct raid_bdev *raid_bdev = base_info->raid_bdev;
-	int rc;
+	int rc = 0;
 
 	/* TODO: defer if rebuild in progress on another base bdev */
 	assert(raid_bdev->process == NULL);
@@ -2824,13 +2850,13 @@ raid_bdev_configure_base_bdev_cont(struct raid_base_bdev_info *base_info)
 	} else if (raid_bdev->num_base_bdevs_discovered > raid_bdev->num_base_bdevs_operational) {
 		assert(raid_bdev->state == RAID_BDEV_STATE_ONLINE);
 		raid_bdev->num_base_bdevs_operational++;
-		rc = raid_bdev_start_rebuild(base_info);
-		if (rc != 0) {
-			SPDK_ERRLOG("Failed to start rebuild: %s\n", spdk_strerror(-rc));
-			_raid_bdev_remove_base_bdev(base_info, NULL, NULL);
+		if (base_info->skip_rebuild == false) {
+			rc = raid_bdev_start_rebuild(base_info);
+			if (rc != 0) {
+				SPDK_ERRLOG("Failed to start rebuild: %s\n", spdk_strerror(-rc));
+				_raid_bdev_remove_base_bdev(base_info, NULL, NULL);
+			}
 		}
-	} else {
-		rc = 0;
 	}
 
 	if (base_info->configure_cb != NULL) {
@@ -3157,6 +3183,375 @@ raid_bdev_add_base_device(struct raid_bdev *raid_bdev, const char *name, uint8_t
 			  raid_base_bdev_cb cb_fn, void *cb_ctx)
 {
 	return _raid_bdev_add_base_device(raid_bdev, name, slot, 0, 0, cb_fn, cb_ctx);
+}
+
+struct raid_bdev_grow_base_bdev_ctx {
+	struct raid_bdev *raid_bdev;
+	char *base_bdev_name;
+	/* Status is the result of the operation, 0 if successful otherwise -ERRNO */
+	int status;
+	uint8_t slot;
+	raid_bdev_destruct_cb cb_fn;
+	void *cb_arg;
+};
+
+static void
+raid_bdev_grow_base_bdev_done(struct raid_bdev_grow_base_bdev_ctx *ctx, int status)
+{
+	if (status && !ctx->status) {
+		ctx->status = status;
+	}
+
+	ctx->raid_bdev->base_bdev_updating = false;
+	if (ctx->cb_fn != NULL) {
+		ctx->cb_fn(ctx->cb_arg, ctx->status);
+	}
+
+	free(ctx->base_bdev_name);
+	free(ctx);
+}
+
+static void
+raid_bdev_grow_base_bdev_write_sb_cb(int status, struct raid_bdev *raid_bdev, void *_ctx)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx = _ctx;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to write raid bdev '%s' superblock: %s\n",
+			    raid_bdev->bdev.name, spdk_strerror(-status));
+	}
+
+	raid_bdev_grow_base_bdev_done(ctx, status);
+}
+
+static void
+raid_bdev_grow_base_bdev_on_unquiesced(void *_ctx, int status)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx = _ctx;
+	struct raid_bdev *raid_bdev = ctx->raid_bdev;
+	struct raid_base_bdev_info *base_info = &raid_bdev->base_bdev_info[ctx->slot];
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to unquiesce raid bdev %s: %s\n",
+			    raid_bdev->bdev.name, spdk_strerror(-status));
+		goto out;
+	}
+
+	if (!ctx->status && raid_bdev->sb) {
+		struct raid_bdev_superblock *sb = raid_bdev->sb;
+		struct raid_bdev_sb_base_bdev *sb_base_bdev = NULL;
+		uint8_t i;
+
+		/* Check if we are filling an hole */
+		for (i = 0; i < sb->base_bdevs_size; i++) {
+			sb_base_bdev = &sb->base_bdevs[i];
+
+			if (sb_base_bdev->state == RAID_SB_BASE_BDEV_REMOVED &&
+			    sb_base_bdev->slot == ctx->slot) {
+				break;
+			}
+		}
+
+		/* New slot */
+		if (i == sb->base_bdevs_size) {
+			sb_base_bdev = &sb->base_bdevs[i];
+
+			/* Update superblock num base bdevs and length */
+			sb->num_base_bdevs = sb->base_bdevs_size = raid_bdev->num_base_bdevs;
+			sb->length = sizeof(*sb) + sizeof(*sb_base_bdev) * sb->base_bdevs_size;
+		}
+
+		assert(sb_base_bdev != NULL);
+
+		spdk_uuid_copy(&sb_base_bdev->uuid, &base_info->uuid);
+		sb_base_bdev->data_offset = base_info->data_offset;
+		sb_base_bdev->data_size = base_info->data_size;
+		sb_base_bdev->state = RAID_SB_BASE_BDEV_CONFIGURED;
+		sb_base_bdev->slot = sb_base_bdev - sb->base_bdevs;
+
+		raid_bdev_write_superblock(raid_bdev, raid_bdev_grow_base_bdev_write_sb_cb, ctx);
+		return;
+	}
+
+out:
+	raid_bdev_grow_base_bdev_done(ctx, status);
+}
+
+static int
+raid_bdev_grow_base_bdev_unquiesce(void *_ctx, int status)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx = _ctx;
+	struct raid_bdev *raid_bdev = ctx->raid_bdev;
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	ctx->status = status;
+	return spdk_bdev_unquiesce(&raid_bdev->bdev, &g_raid_if,
+				   raid_bdev_grow_base_bdev_on_unquiesced, ctx);
+}
+
+static void
+raid_bdev_channels_grow_base_bdev_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+
+	raid_bdev_grow_base_bdev_unquiesce(ctx, status);
+}
+
+static void
+raid_bdev_channel_grow_base_bdev(struct spdk_io_channel_iter *i)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+	void *tmp;
+
+	SPDK_DEBUGLOG(bdev_raid, "slot: %u raid_ch: %p\n", ctx->slot, raid_ch);
+
+	/* Check if num_base_bdevs have been incremented */
+	if (raid_ch->num_channels != ctx->raid_bdev->num_base_bdevs) {
+		/* Reallocate base_channel array */
+		tmp = realloc(raid_ch->base_channel,
+			      ctx->raid_bdev->num_base_bdevs * sizeof(*raid_ch->base_channel));
+		if (!tmp) {
+			SPDK_ERRLOG("Unable to reallocate raid channel base_channel\n");
+			goto err;
+		}
+		memset(tmp + raid_ch->num_channels * sizeof(*raid_ch->base_channel), 0,
+		       sizeof(*raid_ch->base_channel));
+		raid_ch->base_channel = tmp;
+	}
+
+	/* Check for base_channel existence, it could have been removed by a remove operation */
+	if (raid_ch->base_channel[ctx->slot] == NULL) {
+		raid_ch->base_channel[ctx->slot] = spdk_bdev_get_io_channel(
+				ctx->raid_bdev->base_bdev_info[ctx->slot].desc);
+	}
+	if (!raid_ch->base_channel[ctx->slot]) {
+		SPDK_ERRLOG("Unable to create io channel for base bdev\n");
+		goto err;
+	}
+
+	/*
+	 * channel_grow_base_bdev must be called before to update raid_ch->num_channels, so that
+	 * the module can know the previous number of base bdevs
+	 */
+	if (ctx->raid_bdev->module->channel_grow_base_bdev(ctx->raid_bdev, raid_ch) == false) {
+		SPDK_ERRLOG("Unable to grow raid adding a base bdev to raid module channel\n");
+		goto err;
+	}
+
+	raid_ch->num_channels = ctx->raid_bdev->num_base_bdevs;
+
+	spdk_for_each_channel_continue(i, 0);
+
+	return;
+
+err:
+	spdk_for_each_channel_continue(i, -ENOMEM);
+}
+
+static void
+raid_bdev_grow_base_bdev_on_added(void *_ctx, int status)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx = _ctx;
+	struct raid_bdev *raid_bdev = ctx->raid_bdev;
+
+	if (status != 0) {
+		raid_bdev_grow_base_bdev_unquiesce(ctx, status);
+		return;
+	}
+
+	spdk_for_each_channel(raid_bdev, raid_bdev_channel_grow_base_bdev, ctx,
+			      raid_bdev_channels_grow_base_bdev_done);
+}
+
+static int
+raid_bdev_grow_base_bdev_get_slot(struct raid_bdev *raid_bdev, uint8_t *slot)
+{
+	uint8_t num_base_bdevs = raid_bdev->num_base_bdevs;
+	struct raid_base_bdev_info *base_info = NULL;
+	void *tmp;
+	int i;
+
+	/* Check for free slot, because a previous remove operation could have created an hole */
+	for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
+		base_info = &raid_bdev->base_bdev_info[i];
+		if (base_info->name == NULL) {
+			break;
+		}
+	}
+
+	if (base_info != NULL && base_info->remove_scheduled) {
+		SPDK_ERRLOG("A base bdev remove operation is in progress\n");
+		return -EBUSY;
+	}
+
+	/* If no hole was found, we have to increase the number of base bdevs */
+	if (i == raid_bdev->num_base_bdevs) {
+		num_base_bdevs++;
+
+		tmp = realloc(raid_bdev->base_bdev_info, num_base_bdevs * sizeof(*raid_bdev->base_bdev_info));
+		if (tmp == NULL) {
+			SPDK_ERRLOG("Unable able to reallocate base bdev info\n");
+			return -ENOMEM;
+		}
+		memset(tmp + raid_bdev->num_base_bdevs * sizeof(*raid_bdev->base_bdev_info), 0,
+		       sizeof(*raid_bdev->base_bdev_info));
+		raid_bdev->base_bdev_info = tmp;
+
+		/* Check on min_operational have already been done at raid creation */
+		raid_bdev->min_base_bdevs_operational = raid_bdev_module_get_min_operational(raid_bdev->bdev.name,
+							raid_bdev->module,
+							num_base_bdevs);
+
+		raid_bdev->num_base_bdevs = num_base_bdevs;
+	}
+
+	*slot = i;
+
+	return 0;
+}
+
+static void
+raid_bdev_grow_base_bdev_on_quiesced(void *_ctx, int status)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx = _ctx;
+	struct raid_bdev *raid_bdev = ctx->raid_bdev;
+	struct raid_base_bdev_info *base_info;
+	int rc;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to quiesce raid bdev %s: %s\n",
+			    raid_bdev->bdev.name, spdk_strerror(-status));
+		raid_bdev_grow_base_bdev_done(ctx, status);
+		return;
+	}
+
+	spdk_spin_lock(&raid_bdev->base_bdev_lock);
+
+	rc = raid_bdev_grow_base_bdev_get_slot(ctx->raid_bdev, &ctx->slot);
+	if (rc != 0) {
+		goto err;
+	}
+
+	base_info = &raid_bdev->base_bdev_info[ctx->slot];
+	base_info->raid_bdev = raid_bdev;
+	/* TODO add a parameter to the attach and grow functions to set this */
+	base_info->skip_rebuild = true;
+
+	/* Add base bdev to raid */
+	rc = _raid_bdev_add_base_device(raid_bdev, ctx->base_bdev_name, ctx->slot, base_info->data_offset,
+					base_info->data_size, raid_bdev_grow_base_bdev_on_added, ctx);
+	if (rc != 0) {
+		/* raid_bdev_add_base_device could need a cleanup in case of error */
+		if (base_info->name != NULL) {
+			raid_bdev_free_base_bdev_resource(base_info);
+		}
+
+		goto err;
+	}
+
+	spdk_spin_unlock(&raid_bdev->base_bdev_lock);
+	return;
+
+err:
+	spdk_spin_unlock(&raid_bdev->base_bdev_lock);
+	ctx->status = rc;
+	spdk_bdev_unquiesce(&raid_bdev->bdev, &g_raid_if, raid_bdev_grow_base_bdev_on_unquiesced, ctx);
+}
+
+static int
+raid_bdev_grow_base_bdev_quiesce(struct raid_bdev_grow_base_bdev_ctx *ctx)
+{
+	struct raid_bdev *raid_bdev = ctx->raid_bdev;
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	return spdk_bdev_quiesce(&raid_bdev->bdev, &g_raid_if,
+				 raid_bdev_grow_base_bdev_on_quiesced, ctx);
+}
+
+/*
+ * brief:
+ * raid_bdev_grow_base_bdev add a base bdev to a raid bdev, growing the raid's size if needed
+ * params:
+ * raid_bdev - pointer to raid bdev
+ * base_bdev - pointer to base bdev
+ * returns:
+ * 0 - success
+ * non zero - failure
+ */
+int
+raid_bdev_grow_base_bdev(struct raid_bdev *raid_bdev, char *base_bdev_name,
+			 raid_bdev_destruct_cb cb_fn, void *cb_arg)
+{
+	struct raid_bdev_grow_base_bdev_ctx *ctx;
+	struct spdk_bdev *base_bdev;
+	struct raid_base_bdev_info *base_info;
+	int rc;
+
+	assert(raid_bdev != NULL);
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	/* Check if bdev is already a base bdev of this raid */
+	base_bdev = spdk_bdev_get_by_name(base_bdev_name);
+	base_info = raid_bdev_find_base_info_by_bdev(base_bdev);
+	if (base_info != NULL && base_info->raid_bdev == raid_bdev) {
+		SPDK_WARNLOG("bdev to grow '%s' already base bdev of raid %s\n", base_bdev_name,
+			     raid_bdev->bdev.name);
+		if (cb_fn != NULL) {
+			cb_fn(cb_arg, 0);
+		}
+		return 0;
+	}
+
+	if (raid_bdev->state != RAID_BDEV_STATE_ONLINE) {
+		SPDK_ERRLOG("raid bdev '%s' must be in online state to grow base bdev\n",
+			    raid_bdev->bdev.name);
+		return -EINVAL;
+	}
+
+	/* Check if grow operation is supported */
+	if (!raid_bdev->module->channel_grow_base_bdev) {
+		SPDK_ERRLOG("Raid level does not support growth adding a base bdev.\n");
+		return -EPERM;
+	}
+
+
+	if (raid_bdev->base_bdev_updating == true) {
+		SPDK_ERRLOG("Another operation is in progress.\n");
+		return -EBUSY;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		SPDK_ERRLOG("Unable to allocate memory for grow raid bdev context\n");
+		return -ENOMEM;
+	}
+
+	raid_bdev->base_bdev_updating = true;
+
+	ctx->raid_bdev = raid_bdev;
+	ctx->base_bdev_name = strdup(base_bdev_name);
+	if (ctx->base_bdev_name == NULL) {
+		SPDK_ERRLOG("Unable to allocate memory for grow raid bdev base_bdev_name\n");
+		raid_bdev->base_bdev_updating = false;
+		free(ctx);
+		return -ENOMEM;
+	}
+
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	rc = raid_bdev_grow_base_bdev_quiesce(ctx);
+	if (rc != 0) {
+		raid_bdev->base_bdev_updating = false;
+		free(ctx->base_bdev_name);
+		free(ctx);
+	}
+
+	return rc;
 }
 
 static int
