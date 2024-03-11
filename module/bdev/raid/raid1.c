@@ -15,7 +15,7 @@ struct raid1_info {
 
 struct raid1_io_channel {
 	/* Array of per-base_bdev counters of outstanding read blocks on this channel */
-	uint64_t read_blocks_outstanding[0];
+	uint64_t *read_blocks_outstanding;
 };
 
 static void
@@ -352,12 +352,27 @@ raid1_submit_rw_request(struct raid_bdev_io *raid_io)
 static void
 raid1_ioch_destroy(void *io_device, void *ctx_buf)
 {
+	struct raid1_io_channel *r1ch = ctx_buf;
+
+	free(r1ch->read_blocks_outstanding);
 }
 
 static int
 raid1_ioch_create(void *io_device, void *ctx_buf)
 {
-	return 0;
+	struct raid1_io_channel *r1ch = ctx_buf;
+	struct raid1_info *r1info = io_device;
+	struct raid_bdev *raid_bdev = r1info->raid_bdev;
+	int ret = 0;
+
+	r1ch->read_blocks_outstanding = calloc(raid_bdev->num_base_bdevs,
+					       sizeof(*r1ch->read_blocks_outstanding));
+	if (!r1ch->read_blocks_outstanding) {
+		SPDK_ERRLOG("Failed to initialize io channel\n");
+		ret = -ENOMEM;
+	}
+
+	return ret;
 }
 
 static void
@@ -398,8 +413,7 @@ raid1_start(struct raid_bdev *raid_bdev)
 
 	snprintf(name, sizeof(name), "raid1_%s", raid_bdev->bdev.name);
 	spdk_io_device_register(r1info, raid1_ioch_create, raid1_ioch_destroy,
-				sizeof(struct raid1_io_channel) + raid_bdev->num_base_bdevs * sizeof(uint64_t),
-				name);
+				sizeof(struct raid1_io_channel), name);
 
 	return 0;
 }
@@ -533,6 +547,28 @@ raid1_resize(struct raid_bdev *raid_bdev)
 	return true;
 }
 
+static bool
+channel_grow_base_bdev(struct raid_bdev *raid_bdev, struct raid_bdev_io_channel *raid_ch)
+{
+	struct raid1_io_channel *raid1_ch = raid_bdev_channel_get_module_ctx(raid_ch);
+	uint8_t raid_ch_num_channels = raid_bdev_channel_get_num_channels(raid_ch);
+	void *tmp;
+
+	if (raid_ch_num_channels != raid_bdev->num_base_bdevs) {
+		tmp = realloc(raid1_ch->read_blocks_outstanding,
+			      raid_bdev->num_base_bdevs * sizeof(*raid1_ch->read_blocks_outstanding));
+		if (!tmp) {
+			SPDK_ERRLOG("Unable to reallocate raid1 channel base_bdev_modes_read_bw\n");
+			return false;
+		}
+		memset(tmp + raid_ch_num_channels * sizeof(*raid1_ch->read_blocks_outstanding), 0,
+		       sizeof(*raid1_ch->read_blocks_outstanding));
+		raid1_ch->read_blocks_outstanding = tmp;
+	}
+
+	return true;
+}
+
 static struct raid_bdev_module g_raid1_module = {
 	.level = RAID1,
 	.base_bdevs_min = 1,
@@ -544,6 +580,7 @@ static struct raid_bdev_module g_raid1_module = {
 	.get_io_channel = raid1_get_io_channel,
 	.submit_process_request = raid1_submit_process_request,
 	.resize = raid1_resize,
+	.channel_grow_base_bdev = channel_grow_base_bdev,
 };
 RAID_MODULE_REGISTER(&g_raid1_module)
 

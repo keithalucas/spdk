@@ -49,6 +49,17 @@ enum raid_process_type {
 	RAID_PROCESS_MAX
 };
 
+enum raid_bdev_update_state {
+	/* No ongoing updates on raid base bdevs */
+	RAID_BDEV_UPDATE_NONE,
+
+	/* A base bdev removal is ongoing */
+	RAID_BDEV_UPDATE_REMOVING,
+
+	/* A base bdev growth is ongoing */
+	RAID_BDEV_UPDATE_GROWING,
+};
+
 typedef void (*raid_base_bdev_cb)(void *ctx, int status);
 
 /*
@@ -111,6 +122,9 @@ struct raid_base_bdev_info {
 
 	/* context of the callback */
 	void			*configure_cb_ctx;
+
+	/* Set to true to skip the start of the rebuild process when adding to an online raid */
+	bool			skip_rebuild;
 };
 
 struct raid_bdev_io;
@@ -248,6 +262,9 @@ struct raid_bdev {
 	/* Callback and context for raid_bdev configuration */
 	raid_bdev_configure_cb		configure_cb;
 	void				*configure_cb_ctx;
+
+	/* A flag to indicate that an operation to add/remove a base bdev is in progress */
+	enum raid_bdev_update_state	base_bdev_updating;
 };
 
 #define RAID_FOR_EACH_BASE_BDEV(r, i) \
@@ -276,6 +293,8 @@ const char *raid_bdev_state_to_str(enum raid_bdev_state state);
 const char *raid_bdev_process_to_str(enum raid_process_type value);
 void raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ctx *w);
 int raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev, raid_base_bdev_cb cb_fn, void *cb_ctx);
+int raid_bdev_grow_base_bdev(struct raid_bdev *raid_bdev, char *base_bdev_name,
+			     raid_bdev_destruct_cb cb_fn, void *cb_arg);
 
 /*
  * RAID module descriptor
@@ -350,6 +369,11 @@ struct raid_bdev_module {
 				      struct raid_bdev_io_channel *raid_ch);
 
 	TAILQ_ENTRY(raid_bdev_module) link;
+
+	/* Handle for module specific operations needed for raid grow */
+	bool (*channel_grow_base_bdev)(struct raid_bdev *raid_bdev,
+				       struct raid_bdev_io_channel *raid_ch);
+
 };
 
 void raid_bdev_module_list_add(struct raid_bdev_module *raid_module);
@@ -375,6 +399,7 @@ struct spdk_io_channel *raid_bdev_channel_get_base_channel(struct raid_bdev_io_c
 void *raid_bdev_channel_get_module_ctx(struct raid_bdev_io_channel *raid_ch);
 struct raid_base_bdev_info *raid_bdev_channel_get_base_info(struct raid_bdev_io_channel *raid_ch,
 		struct spdk_bdev *base_bdev);
+uint8_t raid_bdev_channel_get_num_channels(struct raid_bdev_io_channel *raid_ch);
 void raid_bdev_process_request_complete(struct raid_bdev_process_request *process_req, int status);
 void raid_bdev_io_init(struct raid_bdev_io *raid_io, struct raid_bdev_io_channel *raid_ch,
 		       enum spdk_bdev_io_type type, uint64_t offset_blocks,
