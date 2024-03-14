@@ -636,3 +636,139 @@ rpc_bdev_raid_set_options(struct spdk_jsonrpc_request *request, const struct spd
 }
 SPDK_RPC_REGISTER("bdev_raid_set_options", rpc_bdev_raid_set_options,
 		  SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
+
+/*
+ * Input structure for RPC rpc_bdev_raid_grow_base_bdev
+ */
+struct rpc_bdev_raid_grow_base_bdev {
+	/* Raid bdev name */
+	char *raid_bdev_name;
+
+	/* Base bdev name */
+	char *base_bdev_name;
+};
+
+/*
+ * brief:
+ * free_rpc_bdev_raid_grow_base_bdev frees RPC bdev_raid_grow_base_bdev related parameters
+ * params:
+ * req - pointer to RPC request
+ * returns:
+ * none
+ */
+static void
+free_rpc_bdev_raid_grow_base_bdev(struct rpc_bdev_raid_grow_base_bdev *req)
+{
+	free(req->raid_bdev_name);
+	free(req->base_bdev_name);
+}
+
+/*
+ * Decoder object for RPC bdev_raid_grow_base_bdev
+ */
+static const struct spdk_json_object_decoder rpc_bdev_raid_grow_base_bdev_decoders[] = {
+	{"raid_name", offsetof(struct rpc_bdev_raid_grow_base_bdev, raid_bdev_name), spdk_json_decode_string},
+	{"base_name", offsetof(struct rpc_bdev_raid_grow_base_bdev, base_bdev_name), spdk_json_decode_string},
+};
+
+struct rpc_bdev_raid_grow_base_bdev_ctx {
+	struct rpc_bdev_raid_grow_base_bdev req;
+	struct spdk_jsonrpc_request *request;
+};
+
+/*
+ * brief:
+ * params:
+ * cb_arg - pointer to the callback context.
+ * rc - return code of the growing a base bdev.
+ * returns:
+ * none
+ */
+static void
+bdev_raid_grow_base_bdev_done(void *cb_arg, int rc)
+{
+	struct rpc_bdev_raid_grow_base_bdev_ctx *ctx = cb_arg;
+	struct spdk_jsonrpc_request *request = ctx->request;
+
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to grow raid %s adding base bdev %s (%d): %s\n",
+			    ctx->req.raid_bdev_name, ctx->req.base_bdev_name, rc, spdk_strerror(-rc));
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 spdk_strerror(-rc));
+		goto exit;
+	}
+
+	spdk_jsonrpc_send_bool_response(request, true);
+exit:
+	free_rpc_bdev_raid_grow_base_bdev(&ctx->req);
+	free(ctx);
+}
+
+/*
+ * brief:
+ * bdev_raid_grow_base_bdev is the RPC to add a base bdev to a raid bdev, growing the raid's size
+ * if there isn't an empty base bdev slot. It takes raid bdev name and base bdev name as input.
+ * params:
+ * request - pointer to json rpc request
+ * params - pointer to request parameters
+ * returns:
+ * none
+ */
+static void
+rpc_bdev_raid_grow_base_bdev(struct spdk_jsonrpc_request *request,
+			     const struct spdk_json_val *params)
+{
+	struct rpc_bdev_raid_grow_base_bdev_ctx *ctx;
+	struct raid_bdev *raid_bdev;
+	struct spdk_bdev *base_bdev;
+	int rc;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
+		return;
+	}
+
+	if (spdk_json_decode_object(params, rpc_bdev_raid_grow_base_bdev_decoders,
+				    SPDK_COUNTOF(rpc_bdev_raid_grow_base_bdev_decoders),
+				    &ctx->req)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_PARSE_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	raid_bdev = raid_bdev_find_by_name(ctx->req.raid_bdev_name);
+	if (raid_bdev == NULL) {
+		spdk_jsonrpc_send_error_response_fmt(request, -ENODEV,
+						     "raid bdev %s not found",
+						     ctx->req.raid_bdev_name);
+		goto cleanup;
+	}
+
+	base_bdev = spdk_bdev_get_by_name(ctx->req.base_bdev_name);
+	if (base_bdev == NULL) {
+		spdk_jsonrpc_send_error_response_fmt(request, -ENODEV,
+						     "base bdev %s not found",
+						     ctx->req.base_bdev_name);
+		goto cleanup;
+	}
+
+	ctx->request = request;
+
+	rc = raid_bdev_grow_base_bdev(raid_bdev, ctx->req.base_bdev_name, bdev_raid_grow_base_bdev_done,
+				      ctx);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response_fmt(request, rc,
+						     "Failed to grow raid %s adding base bdev %s: %s",
+						     ctx->req.raid_bdev_name, ctx->req.base_bdev_name,
+						     spdk_strerror(-rc));
+		goto cleanup;
+	}
+
+	return;
+
+cleanup:
+	free_rpc_bdev_raid_grow_base_bdev(&ctx->req);
+	free(ctx);
+}
+SPDK_RPC_REGISTER("bdev_raid_grow_base_bdev", rpc_bdev_raid_grow_base_bdev, SPDK_RPC_RUNTIME)
