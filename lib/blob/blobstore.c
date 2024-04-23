@@ -2659,11 +2659,6 @@ blob_free_cluster_cpl(void *cb_arg, int bserrno)
 {
 	struct spdk_blob_free_cluster_ctx *ctx = cb_arg;
 	spdk_bs_sequence_t *seq = ctx->seq;
-	struct spdk_blob *blob = ctx->blob;
-
-	if (blob != NULL) {
-		blob->active.num_allocated_clusters--;
-	}
 
 	bs_sequence_finish(seq, bserrno);
 
@@ -8733,6 +8728,9 @@ blob_free_cluster_msg(void *arg)
 
 	ctx->cluster = ctx->blob->active.clusters[ctx->cluster_num];
 	ctx->blob->active.clusters[ctx->cluster_num] = 0;
+	if (ctx->cluster != 0) {
+		ctx->blob->active.num_allocated_clusters--;
+	}
 
 	if (ctx->blob->use_extent_table == false) {
 		/* Extent table is not used, proceed with sync of md that will only use extents_rle. */
