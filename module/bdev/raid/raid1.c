@@ -7,6 +7,7 @@
 
 #include "spdk/likely.h"
 #include "spdk/log.h"
+#include "spdk/bit_array.h"
 
 struct raid1_info {
 	/* The parent raid bdev */
@@ -16,7 +17,43 @@ struct raid1_info {
 struct raid1_io_channel {
 	/* Array of per-base_bdev counters of outstanding read blocks on this channel */
 	uint64_t *read_blocks_outstanding;
+
+	/* Array of per-base_bdev delta maps of faulty base bdevs */
+	struct spdk_bit_array **delta_bitmaps;
+
+	/* The state of the base bdev */
+	enum base_bdev_state	*states;
 };
+
+static void
+raid1_handle_faulty_base_bdev(struct raid_bdev_io *raid_io, struct raid_base_bdev_info *base_info)
+{
+	struct spdk_bdev *bdev = &base_info->raid_bdev->bdev;
+	struct raid1_io_channel *raid1_ch = raid_bdev_channel_get_module_ctx(raid_io->raid_ch);
+	uint32_t section_index, start_section, end_section;
+	uint8_t idx = base_info - base_info->raid_bdev->base_bdev_info;
+
+	if (spdk_likely(raid1_ch->states[idx] == BASE_BDEV_STATE_FAULTY) ||
+	    (raid1_ch->states[idx] == BASE_BDEV_STATE_NONE && base_info->raid_bdev->delta_bitmap_enabled)) {
+		start_section = raid_io->offset_blocks / bdev->optimal_io_boundary;
+		end_section = (raid_io->offset_blocks + raid_io->num_blocks) / bdev->optimal_io_boundary;
+
+		if (spdk_unlikely(!raid1_ch->delta_bitmaps[idx])) {
+			raid1_ch->delta_bitmaps[idx] = spdk_bit_array_create(bdev->blockcnt /
+						       bdev->optimal_io_boundary);
+			if (!raid1_ch->delta_bitmaps[idx]) {
+				raid1_ch->states[idx] = BASE_BDEV_STATE_FAULTY_STOPPED;
+				return;
+			}
+
+			raid1_ch->states[idx] = BASE_BDEV_STATE_FAULTY;
+		}
+
+		for (section_index = start_section; section_index <= end_section; section_index++) {
+			spdk_bit_array_set(raid1_ch->delta_bitmaps[idx], section_index);
+		}
+	}
+}
 
 static void
 raid1_channel_inc_read_counters(struct raid_bdev_io_channel *raid_ch, uint8_t idx,
@@ -58,6 +95,7 @@ raid1_write_bdev_io_completion(struct spdk_bdev_io *bdev_io, bool success, void 
 
 		base_info = raid_bdev_channel_get_base_info(raid_io->raid_ch, bdev_io->bdev);
 		if (base_info) {
+			raid1_handle_faulty_base_bdev(raid_io, base_info);
 			raid_bdev_fail_base_bdev(base_info);
 		}
 	}
@@ -85,6 +123,8 @@ raid1_correct_read_error_completion(struct spdk_bdev_io *bdev_io, bool success, 
 
 	if (!success) {
 		struct raid_base_bdev_info *base_info = raid1_get_read_io_base_bdev(raid_io);
+
+		raid1_handle_faulty_base_bdev(raid_io, base_info);
 
 		/* Writing to the bdev that had the read error failed so fail the base bdev
 		 * but complete the raid_io successfully. */
@@ -318,6 +358,9 @@ raid1_submit_write_request(struct raid_bdev_io *raid_io)
 		base_ch = raid_bdev_channel_get_base_channel(raid_io->raid_ch, idx);
 
 		if (base_ch == NULL) {
+			/* If the base bdev is in faulty state, must update the bitmap */
+			raid1_handle_faulty_base_bdev(raid_io, base_info);
+
 			/* skip a missing base bdev's slot */
 			raid_io->base_bdev_io_submitted++;
 			raid_bdev_io_complete_part(raid_io, 1, SPDK_BDEV_IO_STATUS_FAILED);
@@ -465,8 +508,22 @@ static void
 raid1_ioch_destroy(void *io_device, void *ctx_buf)
 {
 	struct raid1_io_channel *r1ch = ctx_buf;
+	struct raid1_info *r1info = io_device;
+	struct raid_bdev *raid_bdev = r1info->raid_bdev;
+	uint8_t i;
 
 	free(r1ch->read_blocks_outstanding);
+
+	if (r1ch->delta_bitmaps) {
+		for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
+			if (r1ch->delta_bitmaps[i]) {
+				spdk_bit_array_free(&r1ch->delta_bitmaps[i]);
+			}
+		}
+		free(r1ch->delta_bitmaps);
+	}
+
+	free(r1ch->states);
 }
 
 static int
@@ -475,16 +532,33 @@ raid1_ioch_create(void *io_device, void *ctx_buf)
 	struct raid1_io_channel *r1ch = ctx_buf;
 	struct raid1_info *r1info = io_device;
 	struct raid_bdev *raid_bdev = r1info->raid_bdev;
-	int ret = 0;
 
 	r1ch->read_blocks_outstanding = calloc(raid_bdev->num_base_bdevs,
 					       sizeof(*r1ch->read_blocks_outstanding));
 	if (!r1ch->read_blocks_outstanding) {
 		SPDK_ERRLOG("Failed to initialize io channel\n");
-		ret = -ENOMEM;
+		return -ENOMEM;
 	}
 
-	return ret;
+	if (raid_bdev->delta_bitmap_enabled) {
+		r1ch->delta_bitmaps = calloc(raid_bdev->num_base_bdevs,
+					     sizeof(*r1ch->delta_bitmaps));
+		if (!r1ch->delta_bitmaps) {
+			SPDK_ERRLOG("Failed to create delta maps initializing io channel\n");
+			free(r1ch->read_blocks_outstanding);
+			return -ENOMEM;
+		}
+	}
+
+	r1ch->states = calloc(raid_bdev->num_base_bdevs, sizeof(*r1ch->states));
+	if (!r1ch->states) {
+		SPDK_ERRLOG("Failed to create states initializing io channel\n");
+		free(r1ch->delta_bitmaps);
+		free(r1ch->read_blocks_outstanding);
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 
 static void
@@ -501,7 +575,9 @@ static int
 raid1_start(struct raid_bdev *raid_bdev)
 {
 	uint64_t min_blockcnt = UINT64_MAX;
+	uint32_t min_optimal_io_boundary = UINT32_MAX;
 	struct raid_base_bdev_info *base_info;
+	struct spdk_bdev *bdev;
 	struct raid1_info *r1info;
 	char name[256];
 
@@ -514,6 +590,11 @@ raid1_start(struct raid_bdev *raid_bdev)
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 		min_blockcnt = spdk_min(min_blockcnt, base_info->data_size);
+
+		if (base_info->desc != NULL) {
+			bdev = spdk_bdev_desc_get_bdev(base_info->desc);
+			min_optimal_io_boundary = spdk_min(min_optimal_io_boundary, bdev->optimal_io_boundary);
+		}
 	}
 
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
@@ -521,6 +602,7 @@ raid1_start(struct raid_bdev *raid_bdev)
 	}
 
 	raid_bdev->bdev.blockcnt = min_blockcnt;
+	raid_bdev->bdev.optimal_io_boundary = min_optimal_io_boundary;
 	raid_bdev->module_private = r1info;
 
 	snprintf(name, sizeof(name), "raid1_%s", raid_bdev->bdev.name);
@@ -643,9 +725,60 @@ channel_grow_base_bdev(struct raid_bdev *raid_bdev, struct raid_bdev_io_channel 
 		memset(tmp + raid_ch_num_channels * sizeof(*raid1_ch->read_blocks_outstanding), 0,
 		       sizeof(*raid1_ch->read_blocks_outstanding));
 		raid1_ch->read_blocks_outstanding = tmp;
+
+		tmp = realloc(raid1_ch->delta_bitmaps,
+			      raid_bdev->num_base_bdevs * sizeof(*raid1_ch->delta_bitmaps));
+		if (!tmp) {
+			SPDK_ERRLOG("Unable to reallocate raid1 channel delta_bitmaps\n");
+			return false;
+		}
+		memset(tmp + raid_ch_num_channels * sizeof(*raid1_ch->delta_bitmaps), 0,
+		       sizeof(*raid1_ch->delta_bitmaps));
+		raid1_ch->delta_bitmaps = tmp;
 	}
 
 	return true;
+}
+
+static int
+channel_faulty_base_bdev(struct raid_base_bdev_info *base_info,
+			 struct raid_bdev_io_channel *raid_ch,
+			 enum base_bdev_state newState)
+{
+	uint8_t idx = base_info - base_info->raid_bdev->base_bdev_info;
+	struct spdk_bdev *bdev = &base_info->raid_bdev->bdev;
+	struct raid1_io_channel *r1_ch = raid_bdev_channel_get_module_ctx(raid_ch);
+	uint32_t region_block_number = raid_bdev_delta_bitmap_region_blocks_number(bdev);
+	enum base_bdev_state state = r1_ch->states[idx];
+	uint32_t i;
+
+	if (state == BASE_BDEV_STATE_NONE && newState == BASE_BDEV_STATE_FAULTY) {
+		/* Starting faulty state */
+		r1_ch->delta_bitmaps[idx] = spdk_bit_array_create(region_block_number);
+
+		if (!r1_ch->delta_bitmaps[idx]) {
+			return -ENOMEM;
+		}
+	} else if (state == BASE_BDEV_STATE_FAULTY && newState == BASE_BDEV_STATE_FAULTY_STOPPED) {
+		/* Stopping faulty state */
+		for (i = 0; i < region_block_number; i++) {
+			if (spdk_bit_array_get(r1_ch->delta_bitmaps[idx], i)) {
+				spdk_bit_array_set(base_info->delta_bitmap, i);
+			}
+		}
+	} else if ((state == BASE_BDEV_STATE_FAULTY || state == BASE_BDEV_STATE_FAULTY_STOPPED) &&
+		   newState == BASE_BDEV_STATE_NONE) {
+		/* Clearing faulty state */
+		if (r1_ch->delta_bitmaps[idx]) {
+			spdk_bit_array_free(&r1_ch->delta_bitmaps[idx]);
+		}
+	} else if (state == BASE_BDEV_STATE_FAULTY_STOPPED && newState == BASE_BDEV_STATE_FAULTY) {
+		/* This can happen if the creation of delta_bitmap failed in raid1_handle_faulty_base_bdev */
+		return -ENOMEM;
+	}
+
+	r1_ch->states[idx] = newState;
+	return 0;
 }
 
 static struct raid_bdev_module g_raid1_module = {
@@ -660,6 +793,7 @@ static struct raid_bdev_module g_raid1_module = {
 	.get_io_channel = raid1_get_io_channel,
 	.submit_process_request = raid1_submit_process_request,
 	.channel_grow_base_bdev = channel_grow_base_bdev,
+	.channel_faulty_base_bdev = channel_faulty_base_bdev,
 };
 RAID_MODULE_REGISTER(&g_raid1_module)
 
