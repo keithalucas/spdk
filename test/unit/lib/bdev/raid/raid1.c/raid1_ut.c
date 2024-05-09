@@ -70,6 +70,11 @@ raid_bdev_fail_base_bdev(struct raid_base_bdev_info *base_info)
 	base_info->is_failed = true;
 }
 
+struct raid_base_bdev_info *raid_bdev_find_base_info_by_bdev(struct spdk_bdev *base_bdev)
+{
+	return NULL;
+}
+
 static int
 test_setup(void)
 {

@@ -391,7 +391,8 @@ def bdev_raid_get_bdevs(client, category):
     return client.call('bdev_raid_get_bdevs', params)
 
 
-def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size_kb=None, uuid=None, superblock=None):
+def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size_kb=None, uuid=None, superblock=None,
+                     delta_bitmap=None):
     """Create raid bdev. Either strip size arg will work but one is required.
     Args:
         name: user defined raid bdev name
@@ -401,6 +402,7 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size_kb=None, u
         uuid: UUID for this raid bdev (optional)
         superblock: information about raid bdev will be stored in superblock on each base bdev,
                     disabled by default due to backward compatibility
+        delta_bitmap: a delta bitmap for faulty base bdevs will be recorded, disabled by default
     Returns:
         None
     """
@@ -414,6 +416,9 @@ def bdev_raid_create(client, name, raid_level, base_bdevs, strip_size_kb=None, u
         params['uuid'] = uuid
     if superblock is not None:
         params['superblock'] = superblock
+    if delta_bitmap is not None:
+        params['delta_bitmap'] = delta_bitmap
+
     return client.call('bdev_raid_create', params)
 
 
@@ -469,6 +474,45 @@ def bdev_raid_grow_base_bdev(client, raid_name, base_name):
     params = {'raid_name': raid_name, 'base_name': base_name}
 
     return client.call('bdev_raid_grow_base_bdev', params)
+
+
+def bdev_raid_get_base_bdev_delta_bitmap(client, base_bdev_name):
+    """Get the delta bitmap of a faulty base bdev
+
+    Args:
+        base_bdev_name: base bdev name
+
+    Returns:
+        None
+    """
+    params = {'base_bdev_name': base_bdev_name}
+    return client.call('bdev_raid_get_base_bdev_delta_bitmap', params)
+
+
+def bdev_raid_stop_base_bdev_delta_bitmap(client, base_bdev_name):
+    """Stop the updating of the delta bitmap of a faulty base bdev
+
+    Args:
+        base_bdev_name: base bdev name
+
+    Returns:
+        None
+    """
+    params = {'base_bdev_name': base_bdev_name}
+    return client.call('bdev_raid_stop_base_bdev_delta_bitmap', params)
+
+
+def bdev_raid_clear_base_bdev_faulty_state(client, base_bdev_name):
+    """Clear the faulty state of a base bdev
+
+    Args:
+        base_bdev_name: base bdev name
+
+    Returns:
+        None
+    """
+    params = {'base_bdev_name': base_bdev_name}
+    return client.call('bdev_raid_clear_base_bdev_faulty_state', params)
 
 
 def bdev_aio_create(client, filename, name, block_size=None, readonly=None, fallocate=None, uuid=None):

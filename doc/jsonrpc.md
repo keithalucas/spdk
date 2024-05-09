@@ -11408,6 +11408,7 @@ raid_level              | Required | string      | RAID level
 base_bdevs              | Required | string      | Base bdevs name, whitespace separated list in quotes
 uuid                    | Optional | string      | UUID for this RAID bdev
 superblock              | Optional | boolean     | If set, information about raid bdev will be stored in superblock on each base bdev (default: `false`)
+delta_bitmap            | Optional | boolean     | If set, a delta bitmap for faulty base bdevs will be recorded. @ref bdev_raid_get_base_bdev_delta_bitmap
 
 #### Example
 
@@ -11573,6 +11574,125 @@ Example request:
   "params": {
     "raid_name": "Raid1",
     "base_name": "Nvme1n1",
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### bdev_raid_get_base_bdev_delta_bitmap {#rpc_bdev_raid_get_base_bdev_delta_bitmap}
+
+Get the delta bitmap of a faulty base bdev. A base bdev enter in faulty state when it is removed
+from the raid due to a write I/O error or to the deletion of the corresponding bdev.
+When in faulty state, a delta bitmap is created and updated by every I/O write operations performed over
+the raid. Expired a defined timeout, the delta bitmap is deleted and the base bdev is removed from the
+faulty state so that no sign of this base bdev will remain in the raid.
+In the delta bitmap, every region modified has the corrisponding bit set to 1.
+The delta bitmap is returned as a base64 encoded string, region size is in bytes.
+Before to retrieve the delta bitmap with this rpc, it must be stopped with the rpc @ref bdev_raid_stop_base_bdev_delta_bitmap
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+base_bdev_name          | Required | string      | Base bdev name in RAID
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_raid_get_base_bdev_delta_bitmap",
+  "id": 1,
+  "params": {
+    "name": "base0"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": [
+    {
+      "region_size": 4194304,
+      "delta_bitmap": "AA=="
+    }
+  ]
+}
+~~~
+
+### bdev_raid_stop_base_bdev_delta_bitmap {#rpc_bdev_raid_stop_base_bdev_delta_bitmap}
+
+Stop the updating of the delta bitmap of a faulty base bdev
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+base_bdev_name          | Required | string      | Base bdev name in RAID
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_raid_stop_base_bdev_delta_bitmap",
+  "id": 1,
+  "params": {
+    "name": "base0"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### bdev_raid_clear_base_bdev_faulty_state {#rpc_bdev_raid_clear_base_bdev_faulty_state}
+
+Clear the faulty state of a base bdev, in the same way it would have been done internally when the
+timeout expire. It can be used to free the slot occupied by the faulty base bdev into the raid to
+add again the same base bdev to the raid.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+base_bdev_name          | Required | string      | Base bdev name in RAID
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_raid_clear_base_bdev_faulty_state",
+  "id": 1,
+  "params": {
+    "name": "base0"
   }
 }
 ~~~

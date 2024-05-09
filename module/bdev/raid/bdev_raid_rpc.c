@@ -10,6 +10,7 @@
 #include "spdk/string.h"
 #include "spdk/log.h"
 #include "spdk/env.h"
+#include "spdk/bit_array.h"
 
 #define RPC_MAX_BASE_BDEVS 255
 
@@ -137,6 +138,9 @@ struct rpc_bdev_raid_create {
 
 	/* If set, information about raid bdev will be stored in superblock on each base bdev */
 	bool                                 superblock_enabled;
+
+	/* Enable the recording of a delta bitmap for faulty base bdevs */
+	bool				     delta_bitmap_enabled;
 };
 
 /*
@@ -184,6 +188,7 @@ static const struct spdk_json_object_decoder rpc_bdev_raid_create_decoders[] = {
 	{"base_bdevs", offsetof(struct rpc_bdev_raid_create, base_bdevs), decode_base_bdevs},
 	{"uuid", offsetof(struct rpc_bdev_raid_create, uuid), spdk_json_decode_uuid, true},
 	{"superblock", offsetof(struct rpc_bdev_raid_create, superblock_enabled), spdk_json_decode_bool, true},
+	{"delta_bitmap", offsetof(struct rpc_bdev_raid_create, delta_bitmap_enabled), spdk_json_decode_bool, true},
 };
 
 struct rpc_bdev_raid_create_ctx {
@@ -288,7 +293,8 @@ rpc_bdev_raid_create(struct spdk_jsonrpc_request *request,
 	}
 
 	rc = raid_bdev_create(req->name, req->strip_size_kb, num_base_bdevs,
-			      req->level, req->superblock_enabled, &req->uuid, &raid_bdev);
+			      req->level, req->superblock_enabled, &req->uuid,
+			      req->delta_bitmap_enabled, &raid_bdev);
 	if (rc != 0) {
 		spdk_jsonrpc_send_error_response_fmt(request, rc,
 						     "Failed to create RAID bdev %s: %s",
@@ -772,3 +778,213 @@ cleanup:
 	free(ctx);
 }
 SPDK_RPC_REGISTER("bdev_raid_grow_base_bdev", rpc_bdev_raid_grow_base_bdev, SPDK_RPC_RUNTIME)
+
+/* delta bitmap */
+
+/* Structure to decode the input parameters for delta bitmap RPC methods. */
+static const struct spdk_json_object_decoder rpc_bdev_raid_base_bdev_delta_bitmap_decoders[] = {
+	{"base_bdev_name", 0, spdk_json_decode_string},
+};
+
+struct rpc_bdev_raid_delta_bitmap_ctx {
+	char *base_bdev_name;
+	struct spdk_jsonrpc_request *request;
+};
+
+static void
+rpc_bdev_raid_get_base_bdev_delta_bitmap(struct spdk_jsonrpc_request *request,
+		const struct spdk_json_val *params)
+{
+	char *base_bdev_name = NULL;
+	struct spdk_json_write_ctx *w;
+	struct spdk_bit_array *delta_bitmap;
+	char *encoded;
+	uint64_t region_size;
+	int rc;
+
+	rc = spdk_json_decode_object(params, rpc_bdev_raid_base_bdev_delta_bitmap_decoders,
+				     SPDK_COUNTOF(rpc_bdev_raid_base_bdev_delta_bitmap_decoders),
+				     &base_bdev_name);
+	if (rc) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_PARSE_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	delta_bitmap = raid_bdev_get_base_bdev_delta_bitmap(base_bdev_name);
+	if (delta_bitmap == NULL) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		goto cleanup;
+	}
+
+	encoded = spdk_bit_array_to_base64_string(delta_bitmap);
+	if (encoded == NULL) {
+		SPDK_ERRLOG("Failed to encode delta map to base64 string\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 spdk_strerror(ENOMEM));
+		goto cleanup;
+	}
+
+	region_size = raid_bdev_region_size_base_bdev_delta_bitmap(base_bdev_name);
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+
+	spdk_json_write_named_uint64(w, "region_size", region_size);
+	spdk_json_write_named_string(w, "delta_bitmap", encoded);
+
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+
+	free(encoded);
+
+cleanup:
+	free(base_bdev_name);
+}
+SPDK_RPC_REGISTER("bdev_raid_get_base_bdev_delta_bitmap", rpc_bdev_raid_get_base_bdev_delta_bitmap,
+		  SPDK_RPC_RUNTIME)
+
+/*
+ * brief:
+ * params:
+ * cb_arg - pointer to the callback context.
+ * rc - return code of the delta bitmap stopping.
+ * returns:
+ * none
+ */
+static void
+bdev_raid_stop_base_bdev_delta_bitmap_done(void *cb_arg, int rc)
+{
+	struct rpc_bdev_raid_delta_bitmap_ctx *ctx = cb_arg;
+	struct spdk_jsonrpc_request *request = ctx->request;
+
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to stop base bdev %s delta map: %s",
+			    ctx->base_bdev_name, spdk_strerror(-rc));
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 spdk_strerror(-rc));
+		goto exit;
+	}
+
+	spdk_jsonrpc_send_bool_response(request, true);
+exit:
+	free(ctx->base_bdev_name);
+	free(ctx);
+}
+
+static void
+rpc_bdev_raid_stop_base_bdev_delta_bitmap(struct spdk_jsonrpc_request *request,
+		const struct spdk_json_val *params)
+{
+	struct rpc_bdev_raid_delta_bitmap_ctx *ctx;
+	int rc;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
+		return;
+	}
+
+	if (spdk_json_decode_object(params, rpc_bdev_raid_base_bdev_delta_bitmap_decoders,
+				    SPDK_COUNTOF(rpc_bdev_raid_base_bdev_delta_bitmap_decoders),
+				    &ctx->base_bdev_name)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_PARSE_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	ctx->request = request;
+
+	rc = raid_bdev_stop_base_bdev_delta_bitmap(ctx->base_bdev_name,
+			bdev_raid_stop_base_bdev_delta_bitmap_done, ctx);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response_fmt(request, rc,
+						     "Failed to stop base bdev %s delta map: %s",
+						     ctx->base_bdev_name, spdk_strerror(-rc));
+		goto cleanup;
+	}
+
+	return;
+
+cleanup:
+	if (ctx->base_bdev_name) {
+		free(ctx->base_bdev_name);
+	}
+	free(ctx);
+}
+SPDK_RPC_REGISTER("bdev_raid_stop_base_bdev_delta_bitmap",
+		  rpc_bdev_raid_stop_base_bdev_delta_bitmap,
+		  SPDK_RPC_RUNTIME)
+
+/*
+ * brief:
+ * params:
+ * cb_arg - pointer to the callback context.
+ * rc - return code of the faulty base bdev clearing.
+ * returns:
+ * none
+ */
+static void
+bdev_raid_clear_base_bdev_faulty_state_done(void *cb_arg, int rc)
+{
+	struct rpc_bdev_raid_delta_bitmap_ctx *ctx = cb_arg;
+	struct spdk_jsonrpc_request *request = ctx->request;
+
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to clear base bdev %s faulty state: %s",
+			    ctx->base_bdev_name, spdk_strerror(-rc));
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 spdk_strerror(-rc));
+		goto exit;
+	}
+
+	spdk_jsonrpc_send_bool_response(request, true);
+exit:
+	free(ctx->base_bdev_name);
+	free(ctx);
+}
+
+static void
+rpc_bdev_raid_clear_base_bdev_faulty_state(struct spdk_jsonrpc_request *request,
+		const struct spdk_json_val *params)
+{
+	struct rpc_bdev_raid_delta_bitmap_ctx *ctx;
+	int rc;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		spdk_jsonrpc_send_error_response(request, -ENOMEM, spdk_strerror(ENOMEM));
+		return;
+	}
+
+	if (spdk_json_decode_object(params, rpc_bdev_raid_base_bdev_delta_bitmap_decoders,
+				    SPDK_COUNTOF(rpc_bdev_raid_base_bdev_delta_bitmap_decoders),
+				    &ctx->base_bdev_name)) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_PARSE_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	ctx->request = request;
+
+	rc = raid_bdev_clear_base_bdev_faulty_state(ctx->base_bdev_name,
+			bdev_raid_clear_base_bdev_faulty_state_done,
+			ctx);
+	if (rc != 0) {
+		spdk_jsonrpc_send_error_response_fmt(request, rc,
+						     "Failed to clear base bdev %s faulty state: %s",
+						     ctx->base_bdev_name, spdk_strerror(-rc));
+		goto cleanup;
+	}
+
+	return;
+
+cleanup:
+	if (ctx->base_bdev_name) {
+		free(ctx->base_bdev_name);
+	}
+	free(ctx);
+}
+SPDK_RPC_REGISTER("bdev_raid_clear_base_bdev_faulty_state",
+		  rpc_bdev_raid_clear_base_bdev_faulty_state, SPDK_RPC_RUNTIME)
