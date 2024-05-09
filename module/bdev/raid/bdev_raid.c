@@ -12,6 +12,7 @@
 #include "spdk/util.h"
 #include "spdk/json.h"
 #include "spdk/likely.h"
+#include "spdk/bit_array.h"
 
 #define RAID_OFFSET_BLOCKS_INVALID	UINT64_MAX
 #define RAID_BDEV_PROCESS_MAX_QD	16
@@ -383,6 +384,17 @@ raid_bdev_destroy_cb(void *io_device, void *ctx_buf)
 	raid_bdev_ch_process_cleanup(raid_ch);
 }
 
+static void
+raid_bdev_clear_faulty_base_info(struct raid_base_bdev_info *base_info)
+{
+	if (base_info->delta_bitmap != NULL) {
+		spdk_bit_array_free(&base_info->delta_bitmap);
+	}
+	if (base_info->poller != NULL) {
+		spdk_poller_unregister(&base_info->poller);
+	}
+}
+
 /*
  * brief:
  * raid_bdev_cleanup is used to cleanup raid_bdev related data
@@ -405,6 +417,7 @@ raid_bdev_cleanup(struct raid_bdev *raid_bdev)
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 		assert(base_info->desc == NULL);
 		free(base_info->name);
+		raid_bdev_clear_faulty_base_info(base_info);
 	}
 
 	TAILQ_REMOVE(&g_raid_bdev_list, raid_bdev, global_link);
@@ -453,8 +466,11 @@ raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 
 	assert(spdk_get_thread() == spdk_thread_get_app_thread());
 
-	free(base_info->name);
-	base_info->name = NULL;
+	/* Faulty base bdev name will be deleted when the timeout expire and faulty state cleared */
+	if (base_info->state == BASE_BDEV_STATE_NONE) {
+		free(base_info->name);
+		base_info->name = NULL;
+	}
 	if (raid_bdev->state != RAID_BDEV_STATE_CONFIGURING) {
 		spdk_uuid_set_null(&base_info->uuid);
 	}
@@ -473,6 +489,8 @@ raid_bdev_free_base_bdev_resource(struct raid_base_bdev_info *base_info)
 	if (base_info->is_configured) {
 		raid_bdev_deconfigure_base_bdev(base_info);
 	}
+
+	raid_bdev_clear_faulty_base_info(base_info);
 }
 
 static void
@@ -1090,6 +1108,8 @@ raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ct
 	spdk_json_write_named_uint32(w, "num_base_bdevs_discovered", raid_bdev->num_base_bdevs_discovered);
 	spdk_json_write_named_uint32(w, "num_base_bdevs_operational",
 				     raid_bdev->num_base_bdevs_operational);
+	spdk_json_write_named_bool(w, "delta_bitmap_enabled", raid_bdev->delta_bitmap_enabled);
+
 	if (raid_bdev->process) {
 		struct raid_bdev_process *process = raid_bdev->process;
 		uint64_t offset = process->window_offset;
@@ -1116,6 +1136,8 @@ raid_bdev_write_info_json(struct raid_bdev *raid_bdev, struct spdk_json_write_ct
 		}
 		spdk_json_write_named_uuid(w, "uuid", &base_info->uuid);
 		spdk_json_write_named_bool(w, "is_configured", base_info->is_configured);
+		spdk_json_write_named_string(w, "delta_bitmap_state",
+					     raid_bdev_delta_bitmap_state(base_info->state));
 		spdk_json_write_named_uint64(w, "data_offset", base_info->data_offset);
 		spdk_json_write_named_uint64(w, "data_size", base_info->data_size);
 		spdk_json_write_object_end(w);
@@ -1307,6 +1329,13 @@ static const char *g_raid_process_type_names[] = {
 	[RAID_PROCESS_MAX]	= NULL
 };
 
+static const char *g_raid_base_delta_bitmap_state[] = {
+	[BASE_BDEV_STATE_NONE]			= "none",
+	[BASE_BDEV_STATE_FAULTY]		= "updating",
+	[BASE_BDEV_STATE_FAULTY_STOPPED]	= "stopped"
+};
+
+
 /* We have to use the typedef in the function declaration to appease astyle. */
 typedef enum raid_level raid_level_t;
 typedef enum raid_bdev_state raid_bdev_state_t;
@@ -1375,6 +1404,16 @@ raid_bdev_process_to_str(enum raid_process_type value)
 	}
 
 	return g_raid_process_type_names[value];
+}
+
+const char *
+raid_bdev_delta_bitmap_state(enum base_bdev_state value)
+{
+	if (value > BASE_BDEV_STATE_FAULTY_STOPPED) {
+		return "";
+	}
+
+	return g_raid_base_delta_bitmap_state[value];
 }
 
 /*
@@ -1482,7 +1521,7 @@ raid_bdev_init(void)
 static int
 _raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		  enum raid_level level, bool superblock_enabled, const struct spdk_uuid *uuid,
-		  struct raid_bdev **raid_bdev_out)
+		  bool delta_bitmap_enabled, struct raid_bdev **raid_bdev_out)
 {
 	struct raid_bdev *raid_bdev;
 	struct spdk_bdev *raid_bdev_gen;
@@ -1507,6 +1546,11 @@ _raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		}
 	} else if (spdk_u32_is_pow2(strip_size) == false) {
 		SPDK_ERRLOG("Invalid strip size %" PRIu32 "\n", strip_size);
+		return -EINVAL;
+	}
+
+	if (level != RAID1 && delta_bitmap_enabled) {
+		SPDK_ERRLOG("Delta bitmap is supported only by raid1\n");
 		return -EINVAL;
 	}
 
@@ -1561,6 +1605,7 @@ _raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	raid_bdev->level = level;
 	raid_bdev->min_base_bdevs_operational = min_operational;
 	raid_bdev->superblock_enabled = superblock_enabled;
+	raid_bdev->delta_bitmap_enabled = delta_bitmap_enabled;
 
 	raid_bdev_gen = &raid_bdev->bdev;
 
@@ -1603,7 +1648,7 @@ _raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 int
 raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 		 enum raid_level level, bool superblock_enabled, const struct spdk_uuid *uuid,
-		 struct raid_bdev **raid_bdev_out)
+		 bool delta_bitmap_enabled, struct raid_bdev **raid_bdev_out)
 {
 	struct raid_bdev *raid_bdev;
 	int rc;
@@ -1611,7 +1656,7 @@ raid_bdev_create(const char *name, uint32_t strip_size, uint8_t num_base_bdevs,
 	assert(uuid != NULL);
 
 	rc = _raid_bdev_create(name, strip_size, num_base_bdevs, level, superblock_enabled, uuid,
-			       &raid_bdev);
+			       delta_bitmap_enabled, &raid_bdev);
 	if (rc != 0) {
 		return rc;
 	}
@@ -1872,7 +1917,7 @@ raid_bdev_deconfigure(struct raid_bdev *raid_bdev, raid_bdev_destruct_cb cb_fn,
  * returns:
  * base bdev info if found, otherwise NULL.
  */
-static struct raid_base_bdev_info *
+struct raid_base_bdev_info *
 raid_bdev_find_base_info_by_bdev(struct spdk_bdev *base_bdev)
 {
 	struct raid_bdev *raid_bdev;
@@ -1882,6 +1927,32 @@ raid_bdev_find_base_info_by_bdev(struct spdk_bdev *base_bdev)
 		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 			if (base_info->desc != NULL &&
 			    spdk_bdev_desc_get_bdev(base_info->desc) == base_bdev) {
+				return base_info;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+/*
+ * brief:
+ * raid_bdev_find_base_info_by_bdev function finds the base bdev info of a faulty base bdev by name.
+ * params:
+ * base_bdev_name - base bdev name
+ * returns:
+ * base bdev info if found, otherwise NULL.
+ */
+struct raid_base_bdev_info *
+raid_bdev_find_faulty_base_info_by_name(char *base_bdev_name)
+{
+	struct raid_bdev *raid_bdev;
+	struct raid_base_bdev_info *base_info;
+
+	TAILQ_FOREACH(raid_bdev, &g_raid_bdev_list, global_link) {
+		RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
+			if (base_info->state != BASE_BDEV_STATE_NONE &&
+			    strcmp(base_info->name, base_bdev_name) == 0) {
 				return base_info;
 			}
 		}
@@ -1957,8 +2028,12 @@ raid_bdev_channels_remove_base_bdev_done(struct spdk_io_channel_iter *i, int sta
 
 	raid_bdev_free_base_bdev_resource(base_info);
 
-	spdk_bdev_unquiesce(&raid_bdev->bdev, &g_raid_if, raid_bdev_remove_base_bdev_on_unquiesced,
-			    base_info);
+	if (base_info->state == BASE_BDEV_STATE_NONE) {
+		spdk_bdev_unquiesce(&raid_bdev->bdev, &g_raid_if, raid_bdev_remove_base_bdev_on_unquiesced,
+				    base_info);
+	} else {
+		raid_bdev_remove_base_bdev_on_unquiesced(base_info, 0);
+	}
 }
 
 static void
@@ -2196,6 +2271,381 @@ _raid_bdev_remove_base_bdev(struct raid_base_bdev_info *base_info,
 	return ret;
 }
 
+struct raid_bdev_delta_bitmap_ctx {
+	struct raid_base_bdev_info *base_info;
+	int status;
+	raid_bdev_destruct_cb cb_fn;
+	void *cb_arg;
+};
+
+static void
+raid_bdev_channel_clear_faulty_state_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev_delta_bitmap_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+
+	ctx->status = status;
+	if (ctx->cb_fn != NULL) {
+		ctx->cb_fn(ctx->cb_arg, ctx->status);
+	}
+
+	free(ctx);
+}
+
+static void
+raid_bdev_channel_clear_faulty_state(struct spdk_io_channel_iter *i)
+{
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+	struct raid_bdev_delta_bitmap_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	int rc = 0;
+
+	rc = base_info->raid_bdev->module->channel_faulty_base_bdev(base_info, raid_ch,
+			BASE_BDEV_STATE_NONE);
+
+	spdk_for_each_channel_continue(i, rc);
+}
+
+static int
+_raid_bdev_base_bdev_clear_faulty_state(void *arg, raid_bdev_destruct_cb cb_fn, void *cb_arg)
+{
+	struct raid_base_bdev_info *base_info = arg;
+	struct raid_bdev_delta_bitmap_ctx *ctx;
+	struct raid_bdev *raid_bdev;
+
+	assert(base_info != NULL);
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		SPDK_ERRLOG("Unable to allocate memory for clear faulty state context of base bdev %s\n",
+			    base_info->name);
+		return -ENOMEM;
+	}
+
+
+	base_info->state = BASE_BDEV_STATE_NONE;
+	free(base_info->name);
+	base_info->name = NULL;
+	raid_bdev_clear_faulty_base_info(base_info);
+
+	ctx->base_info = base_info;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	raid_bdev = base_info->raid_bdev;
+	spdk_for_each_channel(raid_bdev, raid_bdev_channel_clear_faulty_state, ctx,
+			      raid_bdev_channel_clear_faulty_state_done);
+
+	return 0;
+}
+
+static int
+_raid_bdev_base_bdev_clear_faulty_state_poller(void *arg)
+{
+	struct raid_base_bdev_info *base_info = arg;
+	uint64_t timeout_ticks;
+
+	/* Check if timeout expired */
+	timeout_ticks = base_info->poller_start_ticks + 600 * spdk_get_ticks_hz();
+	if (spdk_get_ticks() < timeout_ticks) {
+		return SPDK_POLLER_IDLE;
+	}
+
+	_raid_bdev_base_bdev_clear_faulty_state(base_info, NULL, NULL);
+
+	return SPDK_POLLER_BUSY;
+}
+
+static void
+raid_bdev_start_faulty_state_on_unquiesced(void *ctx, int status)
+{
+	struct raid_bdev_delta_bitmap_ctx *start_ctx = ctx;
+	struct raid_base_bdev_info *base_info = start_ctx->base_info;
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	if (status != 0 || start_ctx->status != 0) {
+		if (status != 0) {
+			SPDK_ERRLOG("Starting faulty state of base bdev %s, failed to unquiesce raid bdev %s: %s\n",
+				    base_info->name, raid_bdev->bdev.name, spdk_strerror(-status));
+		} else {
+			SPDK_ERRLOG("Failed to start faulty state of base bdev %s: %s\n",
+				    base_info->name, spdk_strerror(-start_ctx->status));
+		}
+		_raid_bdev_base_bdev_clear_faulty_state(base_info, NULL, NULL);
+	} else {
+		base_info->poller_start_ticks = spdk_get_ticks();
+		base_info->poller = SPDK_POLLER_REGISTER(_raid_bdev_base_bdev_clear_faulty_state_poller, base_info,
+				    1000000);
+	}
+
+	free(start_ctx);
+}
+
+static void
+raid_bdev_channel_start_faulty_state_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev_delta_bitmap_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	int rc;
+
+	if (status) {
+		ctx->status = status;
+	}
+
+	rc = spdk_bdev_unquiesce(&base_info->raid_bdev->bdev, &g_raid_if,
+				 raid_bdev_start_faulty_state_on_unquiesced,
+				 ctx);
+	if (rc != 0) {
+		raid_bdev_start_faulty_state_on_unquiesced(ctx, rc);
+	}
+}
+
+static void
+raid_bdev_channel_start_faulty_state(struct spdk_io_channel_iter *i)
+{
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+	struct raid_bdev_delta_bitmap_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	int rc = 0;
+
+	rc = base_info->raid_bdev->module->channel_faulty_base_bdev(base_info, raid_ch,
+			BASE_BDEV_STATE_FAULTY);
+
+	spdk_for_each_channel_continue(i, rc);
+}
+
+static void
+_raid_bdev_start_faulty_state(void *ctx, int status)
+{
+	struct raid_bdev_delta_bitmap_ctx *start_ctx = ctx;
+	struct raid_base_bdev_info *base_info = start_ctx->base_info;
+
+	assert(base_info != NULL);
+
+	if (status != 0) {
+		SPDK_WARNLOG("Failed to remove base bdev %s\n", base_info->name);
+		base_info->is_failed = false;
+		base_info->state = BASE_BDEV_STATE_NONE;
+		free(start_ctx);
+		return;
+	}
+
+	spdk_for_each_channel(base_info->raid_bdev, raid_bdev_channel_start_faulty_state, start_ctx,
+			      raid_bdev_channel_start_faulty_state_done);
+}
+
+static void
+raid_bdev_stop_faulty_state_done(void *_ctx, int status)
+{
+	struct raid_bdev_delta_bitmap_ctx *ctx = _ctx;
+	struct raid_bdev *raid_bdev = ctx->base_info->raid_bdev;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to unquiesce raid bdev %s: %s\n",
+			    raid_bdev->bdev.name, spdk_strerror(-status));
+		ctx->status = status;
+	}
+
+	if (ctx->cb_fn != NULL) {
+		ctx->cb_fn(ctx->cb_arg, ctx->status);
+	}
+
+	free(ctx);
+}
+
+static void
+raid_bdev_channel_stop_faulty_state_done(struct spdk_io_channel_iter *i, int status)
+{
+	struct raid_bdev_delta_bitmap_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_bdev *raid_bdev = ctx->base_info->raid_bdev;
+
+	ctx->status = status;
+	spdk_bdev_unquiesce(&raid_bdev->bdev, &g_raid_if,
+			    raid_bdev_stop_faulty_state_done, ctx);
+}
+
+static void
+raid_bdev_channel_stop_faulty_state(struct spdk_io_channel_iter *i)
+{
+	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+	struct raid_bdev_io_channel *raid_ch = spdk_io_channel_get_ctx(ch);
+	struct raid_bdev_delta_bitmap_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	int rc = 0;
+
+	rc = base_info->raid_bdev->module->channel_faulty_base_bdev(base_info, raid_ch,
+			BASE_BDEV_STATE_FAULTY_STOPPED);
+
+	spdk_for_each_channel_continue(i, rc);
+}
+
+static void
+_raid_bdev_base_bdev_stop_faulty_state(void *_ctx, int status)
+{
+	struct raid_bdev_delta_bitmap_ctx *ctx = _ctx;
+	struct raid_base_bdev_info *base_info = ctx->base_info;
+	struct raid_bdev *raid_bdev = base_info->raid_bdev;
+
+	if (status != 0) {
+		SPDK_ERRLOG("Failed to quiesce raid bdev %s: %s\n",
+			    raid_bdev->bdev.name, spdk_strerror(-status));
+		raid_bdev_stop_faulty_state_done(ctx, status);
+		return;
+	}
+
+	spdk_for_each_channel(raid_bdev, raid_bdev_channel_stop_faulty_state, ctx,
+			      raid_bdev_channel_stop_faulty_state_done);
+}
+
+/*
+ * brief:
+ * raid_bdev_stop_base_bdev_delta_bitmap function is the method to stop the updating of the delta
+ * bitmap for a faulty base bdev.
+ * If the base bdev is not part of any raid, or if the base bdev is not in faulty state, false is
+ * returned.
+ * params:
+ * base_bdev_name - name of the base bdev
+ * returns:
+ * true - success
+ * false - failure
+ */
+int
+raid_bdev_stop_base_bdev_delta_bitmap(char *base_bdev_name, raid_bdev_destruct_cb cb_fn,
+				      void *cb_arg)
+{
+	struct raid_bdev_delta_bitmap_ctx *ctx;
+	struct raid_base_bdev_info *base_info;
+	struct raid_bdev *raid_bdev;
+	struct spdk_bdev *bdev;
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	base_info = raid_bdev_find_faulty_base_info_by_name(base_bdev_name);
+
+	if (!base_info) {
+		SPDK_ERRLOG("bdev '%s' not a faulty base info of any RAID\n", base_bdev_name);
+		return -ENODEV;
+	}
+
+	if (base_info->state == BASE_BDEV_STATE_FAULTY_STOPPED) {
+		SPDK_ERRLOG("Delta bitmap of base bdev %s already stopped\n", base_bdev_name);
+		return -EEXIST;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		SPDK_ERRLOG("Unable to allocate memory for delta bitmap stop context of base bdev %s\n",
+			    base_bdev_name);
+		return -ENOMEM;
+	}
+
+	raid_bdev = base_info->raid_bdev;
+	bdev = &raid_bdev->bdev;
+	base_info->delta_bitmap = spdk_bit_array_create(raid_bdev_delta_bitmap_region_blocks_number(bdev));
+	if (!base_info->delta_bitmap) {
+		SPDK_ERRLOG("Unable to allocate delta bitmap for base bdev %s\n", base_bdev_name);
+		return -ENOMEM;
+	}
+
+	base_info->state = BASE_BDEV_STATE_FAULTY_STOPPED;
+
+	ctx->base_info = base_info;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	return spdk_bdev_quiesce(bdev, &g_raid_if, _raid_bdev_base_bdev_stop_faulty_state, ctx);
+}
+
+/*
+ * brief:
+ * raid_bdev_get_base_bdev_delta_bitmap function is the method to get the delta map of a base bdev that is
+ * in faulty state.
+ * If the base bdev is not part of any raid, or if the base bdev is not in faulty state, NULL is returned.
+ * params:
+ * base_bdev_name - name of the base bdev
+ * returns:
+ * delta map - success
+ * NULL - failure
+ */
+struct spdk_bit_array *raid_bdev_get_base_bdev_delta_bitmap(char *base_bdev_name)
+{
+	struct raid_base_bdev_info *base_info;
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	base_info = raid_bdev_find_faulty_base_info_by_name(base_bdev_name);
+
+	if (!base_info) {
+		SPDK_ERRLOG("bdev '%s' not a faulty base info of any RAID\n", base_bdev_name);
+		return NULL;
+	}
+
+	if (base_info->state != BASE_BDEV_STATE_FAULTY_STOPPED) {
+		SPDK_ERRLOG("Delta bitmap of base bdev '%s' is not stopped\n", base_bdev_name);
+		return NULL;
+	}
+
+	return base_info->delta_bitmap;
+}
+
+/*
+ * brief:
+ * raid_bdev_clear_base_bdev_faulty_state function is the method to clear the faulty state of a
+ * base bdev and so to delete the delta bitmap.
+ * If the base bdev is not part of any raid, or if the base bdev is not in faulty state, false is
+ * returned.
+ * params:
+ * base_bdev_name - name of the base bdev
+ * returns:
+ * true - success
+ * false - failure
+ */
+int
+raid_bdev_clear_base_bdev_faulty_state(char *base_bdev_name, raid_bdev_destruct_cb cb_fn,
+				       void *cb_arg)
+{
+	struct raid_base_bdev_info *base_info;
+	int rc;
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	base_info = raid_bdev_find_faulty_base_info_by_name(base_bdev_name);
+
+	if (!base_info) {
+		SPDK_ERRLOG("bdev '%s' not a faulty base info of any RAID\n", base_bdev_name);
+		return -ENODEV;
+	}
+
+	if (base_info->state == BASE_BDEV_STATE_NONE) {
+		SPDK_ERRLOG("Base bdev %s not in faulty state", base_bdev_name);
+		return -EPERM;
+	}
+
+	rc = _raid_bdev_base_bdev_clear_faulty_state(base_info, cb_fn, cb_arg);
+
+	return rc;
+}
+
+uint64_t
+raid_bdev_region_size_base_bdev_delta_bitmap(char *base_bdev_name)
+{
+	struct raid_base_bdev_info *base_info;
+	struct spdk_bdev *bdev;
+
+	assert(spdk_get_thread() == spdk_thread_get_app_thread());
+
+	base_info = raid_bdev_find_faulty_base_info_by_name(base_bdev_name);
+
+	if (!base_info) {
+		SPDK_ERRLOG("bdev '%s' not a faulty base info of any RAID\n", base_bdev_name);
+		return 0;
+	}
+
+	bdev = &base_info->raid_bdev->bdev;
+	return bdev->optimal_io_boundary * bdev->blocklen;
+}
+
 /*
  * brief:
  * raid_bdev_remove_base_bdev function is called by below layers when base_bdev
@@ -2224,6 +2674,42 @@ raid_bdev_remove_base_bdev(struct spdk_bdev *base_bdev, raid_base_bdev_cb cb_fn,
 	return _raid_bdev_remove_base_bdev(base_info, cb_fn, cb_ctx);
 }
 
+static int
+raid_bdev_start_faulty_state(struct raid_base_bdev_info *base_info)
+{
+	struct raid_bdev_delta_bitmap_ctx *ctx;
+	raid_base_bdev_cb cb_fn = NULL;
+	void *cb_ctx = NULL;
+	int rc;
+
+	if (base_info->raid_bdev->delta_bitmap_enabled) {
+		ctx = calloc(1, sizeof(*ctx));
+		if (ctx == NULL) {
+			SPDK_ERRLOG("Unable to allocate memory for delta bitmap start context of base bdev %s\n",
+				    base_info->name);
+			return -ENOMEM;
+		}
+
+		ctx->base_info = base_info;
+
+		/*
+		 * It is necessary to set here the faulty state, otherwise base info name will be freed
+		 * by _raid_bdev_remove_base_bdev
+		 */
+		base_info->state = BASE_BDEV_STATE_FAULTY;
+		cb_fn = _raid_bdev_start_faulty_state;
+		cb_ctx = ctx;
+	}
+
+	rc = _raid_bdev_remove_base_bdev(base_info, cb_fn, cb_ctx);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to remove base bdev %s: %s\n",
+			    base_info->name, spdk_strerror(-rc));
+	}
+
+	return rc;
+}
+
 static void
 raid_bdev_fail_base_remove_cb(void *ctx, int status)
 {
@@ -2249,7 +2735,7 @@ _raid_bdev_fail_base_bdev(void *ctx)
 	SPDK_NOTICELOG("Failing base bdev in slot %d ('%s') of raid bdev '%s'\n",
 		       raid_bdev_base_bdev_slot(base_info), base_info->name, base_info->raid_bdev->bdev.name);
 
-	rc = _raid_bdev_remove_base_bdev(base_info, raid_bdev_fail_base_remove_cb, base_info);
+	rc = raid_bdev_start_faulty_state(base_info);
 	if (rc != 0) {
 		raid_bdev_fail_base_remove_cb(base_info, rc);
 	}
@@ -2334,6 +2820,26 @@ raid_bdev_resize_base_bdev(struct spdk_bdev *base_bdev)
 	}
 }
 
+static void
+raid_bdev_event_remove_base_bdev(struct spdk_bdev *bdev)
+{
+	struct raid_base_bdev_info *base_info;
+	int rc;
+
+	/* Find the base bdev info which this bdev belongs to */
+	base_info = raid_bdev_find_base_info_by_bdev(bdev);
+	if (!base_info) {
+		SPDK_ERRLOG("bdev to remove '%s' not found\n", bdev->name);
+		return;
+	}
+
+	rc = raid_bdev_start_faulty_state(base_info);
+	if (rc != 0) {
+		SPDK_ERRLOG("Failed to remove base bdev %s: %s\n",
+			    spdk_bdev_get_name(bdev), spdk_strerror(-rc));
+	}
+}
+
 /*
  * brief:
  * raid_bdev_event_base_bdev function is called by below layers when base_bdev
@@ -2349,15 +2855,9 @@ static void
 raid_bdev_event_base_bdev(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
 			  void *event_ctx)
 {
-	int rc;
-
 	switch (type) {
 	case SPDK_BDEV_EVENT_REMOVE:
-		rc = raid_bdev_remove_base_bdev(bdev, NULL, NULL);
-		if (rc != 0) {
-			SPDK_ERRLOG("Failed to remove base bdev %s: %s\n",
-				    spdk_bdev_get_name(bdev), spdk_strerror(-rc));
-		}
+		raid_bdev_event_remove_base_bdev(bdev);
 		break;
 	case SPDK_BDEV_EVENT_RESIZE:
 		raid_bdev_resize_base_bdev(bdev);
@@ -3367,9 +3867,16 @@ raid_bdev_add_base_bdev(struct raid_bdev *raid_bdev, const char *name,
 
 	if (base_info == NULL || raid_bdev->state == RAID_BDEV_STATE_ONLINE) {
 		RAID_FOR_EACH_BASE_BDEV(raid_bdev, iter) {
-			if (iter->name == NULL && spdk_uuid_is_null(&iter->uuid)) {
+			if (iter->name == NULL && spdk_uuid_is_null(&iter->uuid) && iter->state == BASE_BDEV_STATE_NONE) {
 				base_info = iter;
 				break;
+			}
+
+			/* Check if a faulty base bdev with the same name is present */
+			if (iter->state != BASE_BDEV_STATE_NONE && strcmp(iter->name, name) == 0) {
+				SPDK_ERRLOG("Base bdev %s is in faulty state, clear this state before to add\n",
+					    name);
+				return -EBUSY;
 			}
 		}
 	}
@@ -3584,18 +4091,27 @@ raid_bdev_grow_base_bdev_on_added(void *_ctx, int status)
 }
 
 static int
-raid_bdev_grow_base_bdev_get_slot(struct raid_bdev *raid_bdev, uint8_t *slot)
+raid_bdev_grow_base_bdev_get_slot(struct raid_bdev *raid_bdev, char *base_bdev_name, uint8_t *slot)
 {
 	uint8_t num_base_bdevs = raid_bdev->num_base_bdevs;
 	struct raid_base_bdev_info *base_info = NULL;
 	void *tmp;
 	int i;
 
-	/* Check for free slot, because a previous remove operation could have created an hole */
+	/*
+	 * Check for free slot, because a previous remove operation could have created an hole
+	 * Must skip a free slot that is still reserved for a faulty base bdev
+	 */
 	for (i = 0; i < raid_bdev->num_base_bdevs; i++) {
 		base_info = &raid_bdev->base_bdev_info[i];
-		if (base_info->name == NULL) {
+		if (base_info->desc == NULL && base_info->state == BASE_BDEV_STATE_NONE) {
 			break;
+		}
+		/* Check if a faulty base bdev with the same name is present */
+		if (base_info->state != BASE_BDEV_STATE_NONE && strcmp(base_info->name, base_bdev_name) == 0) {
+			SPDK_ERRLOG("Base bdev %s is in faulty state, clear this state before to grow\n",
+				    base_bdev_name);
+			return -EBUSY;
 		}
 	}
 
@@ -3610,7 +4126,7 @@ raid_bdev_grow_base_bdev_get_slot(struct raid_bdev *raid_bdev, uint8_t *slot)
 
 		tmp = realloc(raid_bdev->base_bdev_info, num_base_bdevs * sizeof(*raid_bdev->base_bdev_info));
 		if (tmp == NULL) {
-			SPDK_ERRLOG("Unable able to reallocate base bdev info\n");
+			SPDK_ERRLOG("Unable to reallocate base bdev info\n");
 			return -ENOMEM;
 		}
 		memset(tmp + raid_bdev->num_base_bdevs * sizeof(*raid_bdev->base_bdev_info), 0,
@@ -3645,7 +4161,7 @@ raid_bdev_grow_base_bdev_on_quiesced(void *_ctx, int status)
 		return;
 	}
 
-	rc = raid_bdev_grow_base_bdev_get_slot(ctx->raid_bdev, &ctx->slot);
+	rc = raid_bdev_grow_base_bdev_get_slot(ctx->raid_bdev, ctx->base_bdev_name, &ctx->slot);
 	if (rc != 0) {
 		goto err;
 	}
@@ -3783,7 +4299,7 @@ raid_bdev_create_from_sb(const struct raid_bdev_superblock *sb, struct raid_bdev
 	int rc;
 
 	rc = _raid_bdev_create(sb->name, (sb->strip_size * sb->block_size) / 1024, sb->num_base_bdevs,
-			       sb->level, true, &sb->uuid, &raid_bdev);
+			       sb->level, true, &sb->uuid, sb->delta_bitmap_enabled, &raid_bdev);
 	if (rc != 0) {
 		return rc;
 	}

@@ -80,6 +80,7 @@ raid_bdev_init_superblock(struct raid_bdev *raid_bdev)
 	/* TODO: sb->state */
 	sb->num_base_bdevs = sb->base_bdevs_size = raid_bdev->num_base_bdevs;
 	sb->length = sizeof(*sb) + sizeof(*sb_base_bdev) * sb->base_bdevs_size;
+	sb->delta_bitmap_enabled = raid_bdev->delta_bitmap_enabled;
 
 	sb_base_bdev = &sb->base_bdevs[0];
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
