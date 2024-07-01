@@ -752,7 +752,7 @@ function disk_status_linux() {
 
 	for bdf in "${sorted_bdfs[@]}"; do
 		if [ "$bdf" = "$target_bdf" ]; then
-			driver=${drivers_d["$bdf"]}
+			driver=${pci_bus_driver["$bdf"]}
 			if [ "$numa_nodes" = "0" ]; then
 				node="-"
 			else
