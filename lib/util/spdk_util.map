@@ -68,6 +68,7 @@
 
 	# public functions in crc64.h
 	spdk_crc64_nvme;
+	spdk_crc64_iso_refl;
 
 	# public functions in dif.h
 	spdk_dif_ctx_init;
