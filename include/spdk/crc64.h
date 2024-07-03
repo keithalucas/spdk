@@ -28,6 +28,16 @@ extern "C" {
  */
 uint64_t spdk_crc64_nvme(const void *buf, size_t len, uint64_t crc);
 
+/**
+ * Calculate a CRC-64 checksum (ISO reflected)
+ *
+ * \param buf Data buffer to checksum.
+ * \param len Length of buf in bytes.
+ * \param crc Previous CRC-64 value.
+ * \return Updated CRC-64 value.
+ */
+uint64_t spdk_crc64_iso_refl(const void *buf, size_t len, uint64_t crc);
+
 #ifdef __cplusplus
 }
 #endif
