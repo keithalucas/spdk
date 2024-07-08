@@ -718,6 +718,15 @@ int spdk_blob_get_esnap_id(struct spdk_blob *blob, const void **id, size_t *len)
 bool spdk_blob_is_read_only(struct spdk_blob *blob);
 
 /**
+ * Check if blob has the xattr add only option enabled.
+ *
+ * \param blob Blob.
+ *
+ * \return true if blob is read only and can add new xattrs.
+ */
+bool spdk_blob_has_xattr_add_only(struct spdk_blob *blob);
+
+/**
  * Check if blob is a snapshot.
  *
  * \param blob Blob.
@@ -934,6 +943,21 @@ void spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete
  * \param blob Blob to set.
  */
 int spdk_blob_set_read_only(struct spdk_blob *blob);
+
+/**
+ * Enable the addition of new xattrs to read only blob.
+ *
+ * This call enable an option which will let the addition of new xattr also after the
+ * set of blob as read only.
+ * It must be called before to set the blob as read only, because in this state the
+ * blob's metadata can't be modified anymore.
+ * These changes do not take effect until spdk_blob_sync_md() is called.
+ *
+ * \param blob Blob to set.
+ *
+ * \return 0 on success, -EPERM if the blob is already read only.
+ */
+int spdk_blob_set_xattr_add_only(struct spdk_blob *blob);
 
 /**
  * Sync a blob.

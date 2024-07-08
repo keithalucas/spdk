@@ -1417,6 +1417,115 @@ blob_read_only(void)
 }
 
 static void
+blob_xattr_add_only(void)
+{
+	struct spdk_blob_store *bs;
+	struct spdk_bs_dev *dev;
+	struct spdk_blob *blob;
+	struct spdk_bs_opts opts;
+	spdk_blob_id blobid;
+	uint64_t length = 2345;
+	const void *value;
+	size_t value_len;
+	int rc;
+
+	dev = init_dev();
+	spdk_bs_opts_init(&opts, sizeof(opts));
+	snprintf(opts.bstype.bstype, sizeof(opts.bstype.bstype), "TESTTYPE");
+
+	spdk_bs_init(dev, &opts, bs_op_with_handle_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_bs != NULL);
+	bs = g_bs;
+
+	blob = ut_blob_create_and_open(bs, NULL);
+	blobid = spdk_blob_get_id(blob);
+
+	/* Successful enabling of xattr add only */
+	rc = spdk_blob_set_xattr_add_only(blob);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(blob->xattr_ao == false);
+
+	spdk_blob_sync_md(blob, bs_op_complete, NULL);
+	poll_threads();
+	CU_ASSERT(blob->xattr_ao == true);
+	CU_ASSERT(blob->xattr_ao_flags & SPDK_BLOB_XATTR_ADD_ONLY);
+
+	rc = spdk_blob_set_read_only(blob);
+	CU_ASSERT(rc == 0);
+	spdk_blob_sync_md(blob, bs_op_complete, NULL);
+	poll_threads();
+
+	/* Try to enable xattr add only to a read only blob */
+	rc = spdk_blob_set_xattr_add_only(blob);
+	CU_ASSERT(rc == -EPERM);
+
+	/* Successful adding of new xattr to a read only blob */
+	rc = spdk_blob_set_xattr(blob, "length", &length, sizeof(length));
+	CU_ASSERT(rc == 0);
+
+	rc = spdk_blob_get_xattr_value(blob, "length", &value, &value_len);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(value != NULL);
+	CU_ASSERT(*(uint64_t *)value == length);
+	CU_ASSERT(value_len == 8);
+
+	/* Try to modifiy an existing xattr */
+	rc = spdk_blob_set_xattr(blob, "length", &length, sizeof(length));
+	CU_ASSERT(rc == -EPERM);
+
+	/* Try to change other metadata like the blob's size */
+	spdk_blob_resize(blob, 10, blob_op_complete, NULL);
+	CU_ASSERT(g_bserrno == -EPERM);
+
+	spdk_blob_close(blob, blob_op_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+
+	/* Test the persistence of xattr add only flag  */
+	spdk_bs_open_blob(bs, blobid, blob_op_with_handle_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
+	blob = g_blob;
+
+	CU_ASSERT(blob->xattr_ao == true);
+	CU_ASSERT(blob->xattr_ao_flags & SPDK_BLOB_XATTR_ADD_ONLY);
+
+	spdk_blob_close(blob, blob_op_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+
+	ut_bs_reload(&bs, &opts);
+
+	spdk_bs_open_blob(bs, blobid, blob_op_with_handle_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
+	blob = g_blob;
+
+	CU_ASSERT(blob->xattr_ao == true);
+	CU_ASSERT(blob->xattr_ao_flags & SPDK_BLOB_XATTR_ADD_ONLY);
+
+	/* Successful adding of another new xattr after the blob store reload */
+	rc = spdk_blob_set_xattr(blob, "length2", &length, sizeof(length));
+	CU_ASSERT(rc == 0);
+
+	rc = spdk_blob_get_xattr_value(blob, "length2", &value, &value_len);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(value != NULL);
+	CU_ASSERT(*(uint64_t *)value == length);
+	CU_ASSERT(value_len == 8);
+
+	ut_blob_close_and_delete(bs, blob);
+
+	spdk_bs_unload(bs, bs_op_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+}
+
+static void
 channel_ops(void)
 {
 	struct spdk_blob_store *bs = g_bs;
@@ -10013,6 +10122,7 @@ main(int argc, char **argv)
 		CU_ADD_TEST(suite_bs, blob_resize_test);
 		CU_ADD_TEST(suite_bs, blob_resize_thin_test);
 		CU_ADD_TEST(suite, blob_read_only);
+		CU_ADD_TEST(suite, blob_xattr_add_only);
 		CU_ADD_TEST(suite_bs, channel_ops);
 		CU_ADD_TEST(suite_bs, blob_super);
 		CU_ADD_TEST(suite_blob, blob_write);

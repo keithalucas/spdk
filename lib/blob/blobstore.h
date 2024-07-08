@@ -122,10 +122,12 @@ struct spdk_blob {
 	bool		invalid;
 	bool		data_ro;
 	bool		md_ro;
+	bool		xattr_ao;
 
 	uint64_t	invalid_flags;
 	uint64_t	data_ro_flags;
 	uint64_t	md_ro_flags;
+	uint64_t	xattr_ao_flags;
 
 	struct spdk_bs_dev *back_bs_dev;
 
@@ -344,6 +346,9 @@ struct spdk_blob_md_descriptor_extent_page {
 #define SPDK_BLOB_CLEAR_METHOD (3ULL << SPDK_BLOB_CLEAR_METHOD_SHIFT)
 #define SPDK_BLOB_MD_RO_FLAGS_MASK	SPDK_BLOB_CLEAR_METHOD
 
+#define SPDK_BLOB_XATTR_ADD_ONLY (1ULL << 0)
+#define SPDK_BLOB_XATTR_AO_FLAGS_MASK	SPDK_BLOB_XATTR_ADD_ONLY
+
 struct spdk_blob_md_descriptor_flags {
 	uint8_t		type;
 	uint32_t	length;
@@ -365,6 +370,12 @@ struct spdk_blob_md_descriptor_flags {
 	 *  allow the blob to be opened in md_read_only mode.
 	 */
 	uint64_t	md_ro_flags;
+
+	/*
+	 * If a flag in xattr_ro_flags is set the application is not aware of,
+	 *  don't allow the blob to be opened in xattr_add_only mode.
+	 */
+	uint64_t	xattr_ao_flags;
 };
 
 struct spdk_blob_md_descriptor {

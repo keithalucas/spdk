@@ -714,9 +714,19 @@ blob_parse_page(const struct spdk_blob_md_page *page, struct spdk_blob *blob)
 				blob->md_ro = true;
 			}
 
+			if ((desc_flags->xattr_ao_flags & SPDK_BLOB_XATTR_ADD_ONLY)) {
+				blob->xattr_ao = true;
+			}
+
+			if ((desc_flags->xattr_ao_flags | SPDK_BLOB_XATTR_AO_FLAGS_MASK) !=
+			    SPDK_BLOB_XATTR_AO_FLAGS_MASK) {
+				blob->xattr_ao = false;
+			}
+
 			blob->invalid_flags = desc_flags->invalid_flags;
 			blob->data_ro_flags = desc_flags->data_ro_flags;
 			blob->md_ro_flags = desc_flags->md_ro_flags;
+			blob->xattr_ao_flags = desc_flags->xattr_ao_flags;
 
 		} else if (desc->type == SPDK_MD_DESCRIPTOR_TYPE_EXTENT_RLE) {
 			struct spdk_blob_md_descriptor_extent_rle	*desc_extent_rle;
@@ -1298,6 +1308,7 @@ blob_serialize_flags(const struct spdk_blob *blob,
 	desc->invalid_flags = blob->invalid_flags;
 	desc->data_ro_flags = blob->data_ro_flags;
 	desc->md_ro_flags = blob->md_ro_flags;
+	desc->xattr_ao_flags = blob->xattr_ao_flags;
 
 	*buf_sz -= sizeof(*desc);
 }
@@ -5175,6 +5186,9 @@ bs_dump_print_type_flags(struct spdk_bs_load_ctx *ctx, struct spdk_blob_md_descr
 		ADD_MASK_VAL(SPDK_BLOB_MD_RO_FLAGS_MASK, BLOB_CLEAR_WITH_UNMAP),
 		ADD_MASK_VAL(SPDK_BLOB_MD_RO_FLAGS_MASK, BLOB_CLEAR_WITH_WRITE_ZEROES),
 	};
+	static struct type_flag_desc xattr_ao[] = {
+		ADD_FLAG(SPDK_BLOB_XATTR_ADD_ONLY),
+	};
 #undef ADD_FLAG
 #undef ADD_MASK_VAL
 
@@ -5189,6 +5203,9 @@ bs_dump_print_type_flags(struct spdk_bs_load_ctx *ctx, struct spdk_blob_md_descr
 	fprintf(ctx->fp, "\t  md_ro: 0x%016" PRIx64 "\n", type_desc->md_ro_flags);
 	bs_dump_print_type_bits(ctx, type_desc->md_ro_flags, md_ro,
 				SPDK_COUNTOF(md_ro));
+	fprintf(ctx->fp, "\t  xattr_ao: 0x%016" PRIx64 "\n", type_desc->xattr_ao_flags);
+	bs_dump_print_type_bits(ctx, type_desc->xattr_ao_flags, xattr_ao,
+				SPDK_COUNTOF(xattr_ao));
 }
 
 static void
@@ -8661,6 +8678,23 @@ spdk_blob_set_read_only(struct spdk_blob *blob)
 }
 /* END spdk_blob_set_read_only */
 
+/* START spdk_blob_set_xattr_add_only */
+int
+spdk_blob_set_xattr_add_only(struct spdk_blob *blob)
+{
+	if (blob->md_ro) {
+		return -EPERM;
+	}
+
+	blob_verify_md_op(blob);
+
+	blob->xattr_ao_flags |= SPDK_BLOB_XATTR_ADD_ONLY;
+
+	blob->state = SPDK_BLOB_STATE_DIRTY;
+	return 0;
+}
+/* END spdk_blob_set_xattr_add_only */
+
 /* START spdk_blob_sync_md */
 
 static void
@@ -8671,6 +8705,10 @@ blob_sync_md_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	if (bserrno == 0 && (blob->data_ro_flags & SPDK_BLOB_READ_ONLY)) {
 		blob->data_ro = true;
 		blob->md_ro = true;
+	}
+
+	if (bserrno == 0 && (blob->xattr_ao_flags & SPDK_BLOB_XATTR_ADD_ONLY)) {
+		blob->xattr_ao = true;
 	}
 
 	bs_sequence_finish(seq, bserrno);
@@ -8702,7 +8740,8 @@ spdk_blob_sync_md(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_
 
 	SPDK_DEBUGLOG(blob, "Syncing blob 0x%" PRIx64 "\n", blob->id);
 
-	if (blob->md_ro) {
+	/* In case of read only metadata, only the addition of new xattrs, if enabled, is permitted */
+	if (blob->md_ro && !blob->xattr_ao) {
 		assert(blob->state == SPDK_BLOB_STATE_CLEAN);
 		cb_fn(cb_arg, 0);
 		return;
@@ -9276,7 +9315,7 @@ blob_set_xattr(struct spdk_blob *blob, const char *name, const void *value,
 
 	blob_verify_md_op(blob);
 
-	if (blob->md_ro) {
+	if (blob->md_ro && !blob->xattr_ao) {
 		return -EPERM;
 	}
 
@@ -9296,6 +9335,10 @@ blob_set_xattr(struct spdk_blob *blob, const char *name, const void *value,
 
 	TAILQ_FOREACH(xattr, xattrs, link) {
 		if (!strcmp(name, xattr->name)) {
+			if (blob->xattr_ao) {
+				return -EPERM;
+			}
+
 			tmp = malloc(value_len);
 			if (!tmp) {
 				return -ENOMEM;
@@ -9487,6 +9530,13 @@ spdk_blob_is_read_only(struct spdk_blob *blob)
 {
 	assert(blob != NULL);
 	return (blob->data_ro || blob->md_ro);
+}
+
+bool
+spdk_blob_has_xattr_add_only(struct spdk_blob *blob)
+{
+	assert(blob != NULL);
+	return (blob->xattr_ao);
 }
 
 bool

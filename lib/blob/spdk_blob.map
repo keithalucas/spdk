@@ -33,6 +33,7 @@
 	spdk_blob_get_parent_snapshot;
 	spdk_blob_get_esnap_id;
 	spdk_blob_is_read_only;
+	spdk_blob_has_xattr_add_only;
 	spdk_blob_is_snapshot;
 	spdk_blob_is_clone;
 	spdk_blob_is_thin_provisioned;
@@ -48,6 +49,7 @@
 	spdk_bs_open_blob_ext;
 	spdk_blob_resize;
 	spdk_blob_set_read_only;
+	spdk_blob_set_xattr_add_only;
 	spdk_blob_sync_md;
 	spdk_blob_close;
 	spdk_bs_alloc_io_channel;
