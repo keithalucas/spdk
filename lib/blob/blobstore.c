@@ -17,6 +17,7 @@
 #include "spdk/util.h"
 #include "spdk/string.h"
 #include "spdk/trace.h"
+#include "spdk/crc64.h"
 
 #include "spdk_internal/assert.h"
 #include "spdk_internal/trace_defs.h"
@@ -46,6 +47,9 @@ static void blob_write_extent_page(struct spdk_blob *blob, uint32_t extent, uint
 static void blob_freeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg);
 
 static void bs_shallow_copy_cluster_find_next(void *cb_arg);
+static void bs_snapshot_checksum_cluster_find_next(void *cb_arg);
+
+static void blob_sync_md(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg);
 
 /*
  * External snapshots require a channel per thread per esnap bdev.  The tree
@@ -7833,6 +7837,195 @@ spdk_bs_blob_set_external_parent(struct spdk_blob_store *bs, spdk_blob_id blob_i
 	spdk_bs_open_blob(bs, blob_id, bs_set_external_parent_blob_open_cpl, ctx);
 }
 /* END spdk_bs_blob_set_external_parent */
+
+/* START spdk_bs_snapshot_checksum */
+
+struct snapshot_checksum_ctx {
+	struct spdk_bs_cpl cpl;
+	int bserrno;
+
+	/* Blob to compute checksum */
+	struct spdk_blob_store *bs;
+	spdk_blob_id blobid;
+	struct spdk_blob *blob;
+	struct spdk_io_channel *blob_channel;
+
+	/* Current cluster for compute operation */
+	uint64_t cluster;
+
+	/* Buffer for blob reading */
+	uint8_t *read_buff;
+
+	/* Computed checksum */
+	uint64_t checksum;
+
+	/* Name of the xattr where to store the checksum */
+	const char *xattr_name;
+};
+
+static void
+bs_snapshot_checksum_cleanup_finish(void *cb_arg, int bserrno)
+{
+	struct snapshot_checksum_ctx *ctx = cb_arg;
+	struct spdk_bs_cpl *cpl = &ctx->cpl;
+
+	if (bserrno != 0 && ctx->bserrno == 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 " snapshot checksum, cleanup error %d\n", ctx->blob->id, bserrno);
+		ctx->bserrno = bserrno;
+	}
+
+	spdk_free(ctx->read_buff);
+
+	cpl->u.blob_basic.cb_fn(cpl->u.blob_basic.cb_arg, ctx->bserrno);
+
+	free(ctx);
+}
+
+static void
+bs_snapshot_checksum_md_synchronized(void *cb_arg, int bserrno)
+{
+	struct snapshot_checksum_ctx *ctx = cb_arg;
+	struct spdk_blob *_blob = ctx->blob;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 " snapshot checksum, blob md sync error %d\n", ctx->blob->id,
+			    bserrno);
+		ctx->bserrno = bserrno;
+	}
+
+	_blob->locked_operation_in_progress = false;
+	spdk_blob_close(_blob, bs_snapshot_checksum_cleanup_finish, ctx);
+}
+
+static void
+bs_snapshot_checksum_store_xattr(struct snapshot_checksum_ctx *ctx)
+{
+	struct spdk_blob *_blob = ctx->blob;
+	int rc;
+
+	rc = blob_set_xattr(_blob, ctx->xattr_name, &ctx->checksum, sizeof(ctx->checksum), false);
+	if (rc != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 " snapshot checksum, set xattr error %d\n", ctx->blob->id, rc);
+		ctx->bserrno = rc;
+		_blob->locked_operation_in_progress = false;
+		spdk_blob_close(_blob, bs_snapshot_checksum_cleanup_finish, ctx);
+		return;
+	}
+
+	blob_sync_md(_blob, bs_snapshot_checksum_md_synchronized, ctx);
+}
+
+static void
+bs_snapshot_checksum_blob_read_cpl(void *cb_arg, int bserrno)
+{
+	struct snapshot_checksum_ctx *ctx = cb_arg;
+	struct spdk_blob *_blob = ctx->blob;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 " snapshot checksum, blob read error %d\n", ctx->blob->id, bserrno);
+		ctx->bserrno = bserrno;
+		_blob->locked_operation_in_progress = false;
+		spdk_blob_close(_blob, bs_snapshot_checksum_cleanup_finish, ctx);
+		return;
+	}
+
+	ctx->checksum = spdk_crc64_iso_refl(ctx->read_buff, _blob->bs->cluster_sz, ctx->checksum);
+
+	ctx->cluster++;
+	bs_snapshot_checksum_cluster_find_next(ctx);
+}
+
+static void
+bs_snapshot_checksum_cluster_find_next(void *cb_arg)
+{
+	struct snapshot_checksum_ctx *ctx = cb_arg;
+	struct spdk_blob *_blob = ctx->blob;
+
+	while (ctx->cluster < _blob->active.num_clusters) {
+		if (_blob->active.clusters[ctx->cluster] != 0) {
+			break;
+		}
+
+		ctx->cluster++;
+	}
+
+	if (ctx->cluster < _blob->active.num_clusters) {
+		blob_request_submit_op_single(ctx->blob_channel, _blob, ctx->read_buff,
+					      bs_cluster_to_lba(_blob->bs, ctx->cluster),
+					      bs_dev_byte_to_lba(_blob->bs->dev, _blob->bs->cluster_sz),
+					      bs_snapshot_checksum_blob_read_cpl, ctx, SPDK_BLOB_READ);
+	} else {
+		bs_snapshot_checksum_store_xattr(ctx);
+	}
+}
+
+static void
+bs_snapshot_checksum_blob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int bserrno)
+{
+	struct snapshot_checksum_ctx *ctx = cb_arg;
+
+	if (bserrno != 0) {
+		SPDK_ERRLOG("Snapshot checksum blob open error %d\n", bserrno);
+		ctx->bserrno = bserrno;
+		bs_snapshot_checksum_cleanup_finish(ctx, 0);
+		return;
+	}
+
+	if (!spdk_blob_is_snapshot(_blob)) {
+		SPDK_ERRLOG("blob 0x%" PRIx64 " snapshot checksum, blob must be a snapshot\n", _blob->id);
+		ctx->bserrno = -EPERM;
+		spdk_blob_close(_blob, bs_snapshot_checksum_cleanup_finish, ctx);
+		return;
+	}
+
+	ctx->blob = _blob;
+
+	if (_blob->locked_operation_in_progress) {
+		SPDK_DEBUGLOG(blob, "blob 0x%" PRIx64 " snapshot checksum - another operation in progress\n",
+			      _blob->id);
+		ctx->bserrno = -EBUSY;
+		spdk_blob_close(_blob, bs_snapshot_checksum_cleanup_finish, ctx);
+		return;
+	}
+
+	_blob->locked_operation_in_progress = true;
+
+	ctx->cluster = 0;
+	bs_snapshot_checksum_cluster_find_next(ctx);
+}
+
+void
+spdk_bs_snapshot_checksum(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
+			  spdk_blob_id blob_id, const char *xattr_name,
+			  spdk_blob_op_complete cb_fn, void *cb_arg)
+{
+	struct snapshot_checksum_ctx *ctx;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	ctx->bs = bs;
+	ctx->blobid = blob_id;
+	ctx->xattr_name = xattr_name;
+	ctx->cpl.type = SPDK_BS_CPL_TYPE_BLOB_BASIC;
+	ctx->cpl.u.bs_basic.cb_fn = cb_fn;
+	ctx->cpl.u.bs_basic.cb_arg = cb_arg;
+	ctx->bserrno = 0;
+	ctx->blob_channel = channel;
+	ctx->read_buff = spdk_malloc(bs->cluster_sz, bs->dev->blocklen, NULL,
+				     SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
+	if (!ctx->read_buff) {
+		free(ctx);
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	spdk_bs_open_blob(ctx->bs, ctx->blobid, bs_snapshot_checksum_blob_open_cpl, ctx);
+}
+/* END spdk_bs_snapshot_checksum */
 
 /* START spdk_blob_resize */
 struct spdk_bs_resize_ctx {

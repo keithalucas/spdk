@@ -862,6 +862,22 @@ void spdk_bs_blob_set_external_parent(struct spdk_blob_store *bs, spdk_blob_id b
 				      uint32_t esnap_id_len, spdk_blob_op_complete cb_fn, void *cb_arg);
 
 
+/**
+ * Compute snapshot's checksum and store it as xattr
+ *
+ * This call compute a crc64 iso reflected checksum of snapshot's data and store it as an xattr.
+ * The snapshot must have the option to add new xattrs after its creation.
+ *
+ * \param bs Blobstore.
+ * \param blobid Id of blob.
+ * \param xattr_name Name of the extended attribute.
+ * \param cb_fn Called when the operation is complete.
+ * \param cb_arg Argument passed to function cb_fn.
+ */
+void spdk_bs_snapshot_checksum(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
+			       spdk_blob_id blob_id, const char *xattr_name,
+			       spdk_blob_op_complete cb_fn, void *cb_arg);
+
 struct spdk_blob_open_opts {
 	enum blob_clear_method  clear_method;
 
