@@ -259,6 +259,7 @@ spdk_blob_opts_init(struct spdk_blob_opts *opts, size_t opts_size)
 	}
 
 	SET_FIELD(use_extent_table, true);
+	SET_FIELD(enable_add_xattrs, false);
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -6225,12 +6226,13 @@ blob_opts_copy(const struct spdk_blob_opts *src, struct spdk_blob_opts *dst)
 	SET_FIELD(use_extent_table);
 	SET_FIELD(esnap_id);
 	SET_FIELD(esnap_id_len);
+	SET_FIELD(enable_add_xattrs);
 
 	dst->opts_size = src->opts_size;
 
 	/* You should not remove this statement, but need to update the assert statement
 	 * if you add a new field, and also add a corresponding SET_FIELD statement */
-	SPDK_STATIC_ASSERT(sizeof(struct spdk_blob_opts) == 80, "Incorrect size");
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_blob_opts) == 88, "Incorrect size");
 
 #undef FIELD_OK
 #undef SET_FIELD
@@ -6398,6 +6400,9 @@ struct spdk_clone_snapshot_ctx {
 	/* xattrs specified for snapshot/clones only. They have no impact on
 	 * the original blobs xattrs. */
 	const struct spdk_blob_xattr_opts *xattrs;
+
+	/* This flag enable the addition of new xattrs after the snapshot creation */
+	bool enable_add_xattrs;
 };
 
 static void
@@ -6565,6 +6570,9 @@ bs_snapshot_origblob_sync_cpl(void *cb_arg, int bserrno)
 
 	bs_blob_list_add(ctx->original.blob);
 
+	if (ctx->enable_add_xattrs) {
+		spdk_blob_set_xattr_add_only(newblob);
+	}
 	spdk_blob_set_read_only(newblob);
 
 	/* sync snapshot metadata */
@@ -6835,6 +6843,34 @@ spdk_bs_create_snapshot(struct spdk_blob_store *bs, spdk_blob_id blobid,
 	spdk_bs_open_blob(bs, ctx->original.id, bs_snapshot_origblob_open_cpl, ctx);
 }
 /* END spdk_bs_create_snapshot */
+
+/* START spdk_bs_create_snapshot_ext */
+
+void
+spdk_bs_create_snapshot_ext(struct spdk_blob_store *bs, spdk_blob_id blobid,
+			    const struct spdk_blob_opts *snapshot_opts,
+			    spdk_blob_op_with_id_complete cb_fn, void *cb_arg)
+{
+	struct spdk_clone_snapshot_ctx *ctx = calloc(1, sizeof(*ctx));
+
+	if (!ctx) {
+		cb_fn(cb_arg, SPDK_BLOBID_INVALID, -ENOMEM);
+		return;
+	}
+	ctx->cpl.type = SPDK_BS_CPL_TYPE_BLOBID;
+	ctx->cpl.u.blobid.cb_fn = cb_fn;
+	ctx->cpl.u.blobid.cb_arg = cb_arg;
+	ctx->cpl.u.blobid.blobid = SPDK_BLOBID_INVALID;
+	ctx->bserrno = 0;
+	ctx->frozen = false;
+	ctx->original.id = blobid;
+	ctx->xattrs = &snapshot_opts->xattrs;
+	ctx->enable_add_xattrs = snapshot_opts->enable_add_xattrs;
+
+	spdk_bs_open_blob(bs, ctx->original.id, bs_snapshot_origblob_open_cpl, ctx);
+}
+
+/* END spdk_bs_create_snapshot_ext */
 
 /* START spdk_bs_create_clone */
 

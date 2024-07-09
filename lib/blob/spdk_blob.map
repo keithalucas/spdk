@@ -28,6 +28,7 @@
 	spdk_bs_create_blob_ext;
 	spdk_bs_create_blob;
 	spdk_bs_create_snapshot;
+	spdk_bs_create_snapshot_ext;
 	spdk_bs_create_clone;
 	spdk_blob_get_clones;
 	spdk_blob_get_parent_snapshot;

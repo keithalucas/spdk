@@ -884,6 +884,85 @@ blob_snapshot(void)
 }
 
 static void
+blob_snapshot_ext(void)
+{
+	struct spdk_blob_store *bs = g_bs;
+	struct spdk_blob *blob;
+	struct spdk_blob *snapshot;
+	struct spdk_blob_opts opts;
+	spdk_blob_id blobid;
+	spdk_blob_id snapshotid;
+	uint64_t length = 2345;
+	const void *value;
+	size_t value_len;
+	int rc;
+
+	/* Create blob with 10 clusters */
+	ut_spdk_blob_opts_init(&opts);
+	opts.num_clusters = 10;
+
+	blob = ut_blob_create_and_open(bs, &opts);
+	blobid = spdk_blob_get_id(blob);
+	CU_ASSERT(spdk_blob_get_num_clusters(blob) == 10);
+
+	/* Create blob's snapshot with xattrs and the option to add new xattrs after its creation */
+	ut_spdk_blob_opts_init(&opts);
+	opts.xattrs.names = g_xattr_names;
+	opts.xattrs.get_value = _get_xattr_value;
+	opts.xattrs.count = 3;
+	opts.xattrs.ctx = &g_ctx;
+	opts.enable_add_xattrs = true;
+
+	spdk_bs_create_snapshot_ext(bs, blobid, &opts, blob_op_with_id_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+	CU_ASSERT(g_blobid != SPDK_BLOBID_INVALID);
+	CU_ASSERT_EQUAL(_get_snapshots_count(bs), 1);
+	snapshotid = g_blobid;
+
+	spdk_bs_open_blob(bs, snapshotid, blob_op_with_handle_complete, NULL);
+	poll_threads();
+	CU_ASSERT(g_bserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
+	snapshot = g_blob;
+	CU_ASSERT(snapshot->data_ro == true);
+	CU_ASSERT(snapshot->md_ro == true);
+	CU_ASSERT(snapshot->xattr_ao == true);
+
+	rc = spdk_blob_get_xattr_value(snapshot, g_xattr_names[0], &value, &value_len);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(value != NULL);
+	CU_ASSERT(value_len == strlen(g_xattr_values[0]));
+	CU_ASSERT_NSTRING_EQUAL_FATAL(value, g_xattr_values[0], value_len);
+
+	rc = spdk_blob_get_xattr_value(snapshot, g_xattr_names[1], &value, &value_len);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(value != NULL);
+	CU_ASSERT(value_len == strlen(g_xattr_values[1]));
+	CU_ASSERT_NSTRING_EQUAL((char *)value, g_xattr_values[1], value_len);
+
+	rc = spdk_blob_get_xattr_value(snapshot, g_xattr_names[2], &value, &value_len);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(value != NULL);
+	CU_ASSERT(value_len == strlen(g_xattr_values[2]));
+	CU_ASSERT_NSTRING_EQUAL((char *)value, g_xattr_values[2], value_len);
+
+	/* Add new xattr to existing snapshot */
+	rc = spdk_blob_set_xattr(blob, "length", &length, sizeof(length));
+	CU_ASSERT(rc == 0);
+
+	rc = spdk_blob_get_xattr_value(blob, "length", &value, &value_len);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(value != NULL);
+	CU_ASSERT(*(uint64_t *)value == length);
+	CU_ASSERT(value_len == 8);
+
+	/* Clean up */
+	ut_blob_close_and_delete(bs, blob);
+	ut_blob_close_and_delete(bs, snapshot);
+}
+
+static void
 blob_snapshot_freeze_io(void)
 {
 	struct spdk_io_channel *channel;
@@ -10116,6 +10195,7 @@ main(int argc, char **argv)
 		CU_ADD_TEST(suite_bs, blob_create_zero_extent);
 		CU_ADD_TEST(suite, blob_thin_provision);
 		CU_ADD_TEST(suite_bs, blob_snapshot);
+		CU_ADD_TEST(suite_bs, blob_snapshot_ext);
 		CU_ADD_TEST(suite_bs, blob_clone);
 		CU_ADD_TEST(suite_bs, blob_inflate);
 		CU_ADD_TEST(suite_bs, blob_delete);
