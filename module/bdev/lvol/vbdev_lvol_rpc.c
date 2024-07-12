@@ -384,6 +384,7 @@ SPDK_RPC_REGISTER("bdev_lvol_create", rpc_bdev_lvol_create, SPDK_RPC_RUNTIME)
 struct rpc_bdev_lvol_snapshot {
 	char *lvol_name;
 	char *snapshot_name;
+	bool enable_add_xattrs;
 	char **xattrs;
 };
 
@@ -454,6 +455,7 @@ static const struct spdk_json_object_decoder rpc_bdev_lvol_snapshot_decoders[] =
 	{"lvol_name", offsetof(struct rpc_bdev_lvol_snapshot, lvol_name), spdk_json_decode_string},
 	{"snapshot_name", offsetof(struct rpc_bdev_lvol_snapshot, snapshot_name), spdk_json_decode_string},
 	{"xattrs", offsetof(struct rpc_bdev_lvol_snapshot, xattrs), bdev_lvol_snapshot_decode_xattrs, true},
+	{"enable_add_xattrs", offsetof(struct rpc_bdev_lvol_snapshot, enable_add_xattrs), spdk_json_decode_bool, true},
 };
 
 static void
@@ -515,7 +517,7 @@ rpc_bdev_lvol_snapshot(struct spdk_jsonrpc_request *request,
 	}
 
 	vbdev_lvol_create_snapshot(lvol, req.snapshot_name,
-				   (const char *const *)req.xattrs, count,
+				   req.xattrs, count, req.enable_add_xattrs,
 				   rpc_bdev_lvol_snapshot_cb, request);
 
 cleanup:

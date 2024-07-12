@@ -39,8 +39,19 @@ int vbdev_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz
 		      spdk_lvol_op_with_handle_complete cb_fn,
 		      void *cb_arg);
 
+/**
+ * \brief Create snapshot of lvol
+ * \param lvol Handle to lvol
+ * \param snapshot_name Name of the snapshot to create
+ * \param xattrs List of xattrs to be added to the snapshot (in the format par1, val1, par2, val2, ...)
+ * \param xattrs_num Number of elements in the list
+ * \param enable_add_xattrs Enable the addition of new xattrs to the snapshot after its creation
+ * \param cb_fn Completion callback
+ * \param cb_arg Completion callback custom arguments
+ * \return error
+ */
 void vbdev_lvol_create_snapshot(struct spdk_lvol *lvol, const char *snapshot_name,
-				const char *const *xattrs, size_t xattrs_num,
+				char **xattrs, size_t xattrs_num, bool enable_add_xattrs,
 				spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
 
 void vbdev_lvol_create_clone(struct spdk_lvol *lvol, const char *clone_name,

@@ -298,6 +298,12 @@ spdk_blob_is_read_only(struct spdk_blob *blob)
 }
 
 bool
+spdk_blob_has_xattr_add_only(struct spdk_blob *blob)
+{
+	return false;
+}
+
+bool
 spdk_blob_is_snapshot(struct spdk_blob *blob)
 {
 	return false;
@@ -883,9 +889,9 @@ spdk_lvol_create_snapshot(struct spdk_lvol *lvol, const char *snapshot_name,
 }
 
 void
-spdk_lvol_create_snapshot_with_xattrs(struct spdk_lvol *lvol, const char *snapshot_name,
-				      const char *const *xattrs, size_t xattrs_num,
-				      spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
+spdk_lvol_create_snapshot_ext(struct spdk_lvol *lvol, const char *snapshot_name,
+			      const struct spdk_lvol_opts *opts,
+			      spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
 {
 	g_snapshot_xattr_called = true;
 	spdk_lvol_create_snapshot(lvol, snapshot_name, cb_fn, cb_arg);
@@ -1077,7 +1083,6 @@ ut_lvol_snapshot(void)
 	int sz = 10;
 	int rc;
 	struct spdk_lvol *lvol = NULL;
-	char *xattrs[] = {"par", "val"};
 
 	/* Lvol store is successfully created */
 	rc = vbdev_lvs_create("bdev", "lvs", 0, LVS_CLEAR_WITH_UNMAP, 0,
@@ -1099,28 +1104,8 @@ ut_lvol_snapshot(void)
 	lvol = g_lvol;
 
 	/* Successful snap create */
-	vbdev_lvol_create_snapshot(lvol, "snap", NULL, 0, vbdev_lvol_create_complete, NULL);
+	vbdev_lvol_create_snapshot(lvol, "snap", NULL, 0, false, vbdev_lvol_create_complete, NULL);
 	SPDK_CU_ASSERT_FATAL(rc == 0);
-	CU_ASSERT(g_lvol != NULL);
-	CU_ASSERT(g_lvolerrno == 0);
-	CU_ASSERT(g_snapshot_xattr_called == false);
-
-	/* Snap create with NULL xattrs and xattrs number > 0 */
-	g_lvol = NULL;
-	vbdev_lvol_create_snapshot(lvol, "snap2", NULL, 2,
-				   vbdev_lvol_create_complete, NULL);
-	CU_ASSERT(g_lvol == NULL);
-	CU_ASSERT(g_lvolerrno == -EINVAL);
-
-	/* Snap create with valid xattrs and 0 xattrs number */
-	vbdev_lvol_create_snapshot(lvol, "snap2", (const char *const *)&xattrs, 0,
-				   vbdev_lvol_create_complete, NULL);
-	CU_ASSERT(g_lvol == NULL);
-	CU_ASSERT(g_lvolerrno == -EINVAL);
-
-	/* Successful snap create with xattr */
-	vbdev_lvol_create_snapshot(lvol, "snap4", (const char *const *)&xattrs, 2,
-				   vbdev_lvol_create_complete, NULL);
 	CU_ASSERT(g_lvol != NULL);
 	CU_ASSERT(g_lvolerrno == 0);
 	CU_ASSERT(g_snapshot_xattr_called == true);
@@ -1170,7 +1155,7 @@ ut_lvol_clone(void)
 	lvol = g_lvol;
 
 	/* Successful snap create */
-	vbdev_lvol_create_snapshot(lvol, "snap", NULL, 0, vbdev_lvol_create_complete, NULL);
+	vbdev_lvol_create_snapshot(lvol, "snap", NULL, 0, false, vbdev_lvol_create_complete, NULL);
 	SPDK_CU_ASSERT_FATAL(rc == 0);
 	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
 	CU_ASSERT(g_lvolerrno == 0);

@@ -2060,13 +2060,16 @@ Format: 'user:u1 secret:s1 muser:mu1 msecret:ms1,user:u2 secret:s2 muser:mu2 mse
         print_json(rpc.lvol.bdev_lvol_snapshot(args.client,
                                                lvol_name=args.lvol_name,
                                                snapshot_name=args.snapshot_name,
-                                               xattrs=xattrs))
+                                               xattrs=xattrs,
+                                               enable_add_xattrs=args.enable_add_xattrs))
 
     p = subparsers.add_parser('bdev_lvol_snapshot', help='Create a snapshot of an lvol bdev')
     p.add_argument('lvol_name', help='lvol bdev name')
     p.add_argument('snapshot_name', help='lvol snapshot name')
     p.add_argument('--xattr', action='append', metavar='key=value',
                    help="adds a key=value xattr to the snapshot")
+    p.add_argument('--enable-add-xattrs', action='store_true',
+                   help='enable the addition of new xattrs to the snapshot after its creation')
     p.set_defaults(func=bdev_lvol_snapshot)
 
     def bdev_lvol_clone(args):

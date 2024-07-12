@@ -89,13 +89,14 @@ def bdev_lvol_create(client, lvol_name, size_in_mib, thin_provision=False, uuid=
     return client.call('bdev_lvol_create', params)
 
 
-def bdev_lvol_snapshot(client, lvol_name, snapshot_name, xattrs=None):
+def bdev_lvol_snapshot(client, lvol_name, snapshot_name, xattrs=None, enable_add_xattrs=False):
     """Capture a snapshot of the current state of a logical volume.
 
     Args:
         lvol_name: logical volume to create a snapshot from
         snapshot_name: name for the newly created snapshot
         xattrs: a map of xattr keys to values (optional)
+        enable_add_xattrs: enable the addition of new xattrs to the snapshot after its creation
 
     Returns:
         Name of created logical volume snapshot.
@@ -106,6 +107,8 @@ def bdev_lvol_snapshot(client, lvol_name, snapshot_name, xattrs=None):
     }
     if xattrs is not None:
         params['xattrs'] = xattrs
+    if enable_add_xattrs:
+        params['enable_add_xattrs'] = enable_add_xattrs
 
     return client.call('bdev_lvol_snapshot', params)
 

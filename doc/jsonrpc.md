@@ -10260,6 +10260,7 @@ Name                    | Optional | Type        | Description
 lvol_name               | Required | string      | UUID or alias of the logical volume to create a snapshot from
 snapshot_name           | Required | string      | Name for the newly created snapshot
 xattrs                  | Optional | string map  | Xattrs for the newly created snapshot
+enable_add_xattrs       | Optional | boolean     | Enable the addition of new xattrs to the snapshot after its creation
 
 #### Response
 
@@ -10280,7 +10281,8 @@ Example request:
     "xattrs": {
       "snapshot_timestamp": "2024-01-16T16:06:46Z",
       "user_created": "true",
-    }
+    },
+    "enable_add_xattrs": false
   }
 }
 ~~~
