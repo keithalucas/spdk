@@ -74,11 +74,33 @@ struct spdk_lvs_opts {
 SPDK_STATIC_ASSERT(sizeof(struct spdk_lvs_opts) == 280, "Incorrect size");
 
 /**
+ * Parameters for snapshot creation.
+ */
+struct spdk_lvol_opts {
+	/* List of xattrs to be added to the snapshot (the list has the format par1, val1, par2, val2, ...) */
+	char **xattrs;
+
+	/* Number of elements in the xattrs list */
+	size_t xattrs_num;
+
+	/* This flag enable the addition of new xattrs to the snapshot after its creation */
+	bool enable_add_xattrs;
+};
+SPDK_STATIC_ASSERT(sizeof(struct spdk_lvol_opts) == 24, "Incorrect size");
+
+/**
  * Initialize an spdk_lvs_opts structure to the defaults.
  *
  * \param opts Pointer to the spdk_lvs_opts structure to initialize.
  */
 void spdk_lvs_opts_init(struct spdk_lvs_opts *opts);
+
+/**
+ * Initialize an spdk_lvol_opts structure to the defaults.
+ *
+ * \param opts Pointer to the spdk_lvol_opts structure to initialize.
+ */
+void spdk_lvol_opts_init(struct spdk_lvol_opts *opts);
 
 /**
  * Callback definition for lvolstore operations, including handle to lvs.
@@ -217,18 +239,17 @@ void spdk_lvol_create_snapshot(struct spdk_lvol *lvol, const char *snapshot_name
 			       spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
 
 /**
- * Create snapshot of given lvol with xattrs.
+ * Create snapshot of given lvol with provided options.
  *
  * \param lvol Handle to lvol.
  * \param snapshot_name Name of created snapshot.
- * \param xattrs Xattrs list for the snapshot (the list has the format par1, val1, par2, val2, ...).
- * \param xattrs_num Number of elements in the \c xattrs list.
+ * \param opts Options for snapshot.
  * \param cb_fn Completion callback.
  * \param cb_arg Completion callback custom arguments.
  */
-void spdk_lvol_create_snapshot_with_xattrs(struct spdk_lvol *lvol, const char *snapshot_name,
-		const char *const *xattrs, size_t xattrs_num,
-		spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
+void spdk_lvol_create_snapshot_ext(struct spdk_lvol *lvol, const char *snapshot_name,
+				   const struct spdk_lvol_opts *opts,
+				   spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg);
 
 /**
  * Create clone of given snapshot.

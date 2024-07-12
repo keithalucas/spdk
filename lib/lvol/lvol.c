@@ -129,36 +129,34 @@ lvol_free(struct spdk_lvol *lvol)
 }
 
 static void
-lvol_free_xattrs_list(char **xattrs)
+lvol_free_xattrs_list(char **xattrs, size_t xattrs_num)
 {
-	char **entry;
+	size_t i;
 
 	if (xattrs) {
-		for (entry = xattrs; *entry; entry++) {
-			free(*entry);
+		for (i = 0; i < xattrs_num; i++) {
+			if (xattrs[i] != NULL) {
+				free(xattrs[i]);
+			}
 		}
 		free(xattrs);
 	}
 }
 
 static char **
-lvol_dup_xattr_list(const char *const *xattrs, size_t xattr_num)
+lvol_dup_xattr_list(char **xattrs, size_t xattr_num)
 {
 	size_t count;
 	char **copy;
 
-	if (!xattrs) {
-		return NULL;
-	}
-
-	copy = calloc(xattr_num + 1, sizeof(*copy));
+	copy = calloc(xattr_num, sizeof(*copy));
 	if (!copy) {
 		return NULL;
 	}
 
 	for (count = 0; count < xattr_num; count++) {
 		if (!(copy[count] = strdup(xattrs[count]))) {
-			lvol_free_xattrs_list(copy);
+			lvol_free_xattrs_list(copy, xattr_num);
 			return NULL;
 		}
 	}
@@ -1030,6 +1028,15 @@ spdk_lvs_destroy(struct spdk_lvol_store *lvs, spdk_lvs_op_complete cb_fn,
 	return 0;
 }
 
+void
+spdk_lvol_opts_init(struct spdk_lvol_opts *opts)
+{
+	memset(opts, 0, sizeof(*opts));
+	opts->xattrs = NULL;
+	opts->xattrs_num = 0;
+	opts->enable_add_xattrs = false;
+}
+
 static void
 lvol_close_blob_cb(void *cb_arg, int lvolerrno)
 {
@@ -1105,8 +1112,8 @@ lvol_create_open_cb(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 
 	if (lvolerrno < 0) {
 		lvol_free(lvol);
-		lvol_free_xattrs_list(req->xattrs_external);
-		lvol_free_xattrs_list(req->xattr_names);
+		lvol_free_xattrs_list(req->xattrs_external, req->xattrs_external_num);
+		lvol_free_xattrs_list(req->xattrs_name, req->xattrs_name_num);
 		req->cb_fn(req->cb_arg, NULL, lvolerrno);
 		free(req);
 		return;
@@ -1119,8 +1126,8 @@ lvol_create_open_cb(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 
 	lvol->ref_count++;
 
-	lvol_free_xattrs_list(req->xattrs_external);
-	lvol_free_xattrs_list(req->xattr_names);
+	lvol_free_xattrs_list(req->xattrs_external, req->xattrs_external_num);
+	lvol_free_xattrs_list(req->xattrs_name, req->xattrs_name_num);
 	assert(req->cb_fn != NULL);
 	req->cb_fn(req->cb_arg, req->lvol, lvolerrno);
 	free(req);
@@ -1136,8 +1143,8 @@ lvol_create_cb(void *cb_arg, spdk_blob_id blobid, int lvolerrno)
 	if (lvolerrno < 0) {
 		TAILQ_REMOVE(&req->lvol->lvol_store->pending_lvols, req->lvol, link);
 		lvol_free(req->lvol);
-		lvol_free_xattrs_list(req->xattrs_external);
-		lvol_free_xattrs_list(req->xattr_names);
+		lvol_free_xattrs_list(req->xattrs_external, req->xattrs_external_num);
+		lvol_free_xattrs_list(req->xattrs_name, req->xattrs_name_num);
 		assert(req->cb_fn != NULL);
 		req->cb_fn(req->cb_arg, NULL, lvolerrno);
 		free(req);
@@ -1414,6 +1421,7 @@ spdk_lvol_create_snapshot(struct spdk_lvol *origlvol, const char *snapshot_name,
 struct xattrs_ctx {
 	struct spdk_lvol *newlvol;
 	char **xattrs_external;
+	size_t xattrs_external_num;
 };
 
 static void
@@ -1427,16 +1435,18 @@ lvol_get_xattr_value_ext(void *xattr_ctx, const char *name,
 
 	if (*value == NULL || *value_len == 0) {
 		/* Search for external xattr */
-		for (i = 0; ctx->xattrs_external[i]; i++) {
-			/* Skip xattrs value, we search xattr names, which are in even positions */
-			if (i % 2 != 0) {
-				continue;
-			}
+		if (ctx->xattrs_external != NULL) {
+			for (i = 0; i < ctx->xattrs_external_num; i++) {
+				/* Skip xattrs value, we search xattr names, which are in even positions */
+				if (i % 2 != 0) {
+					continue;
+				}
 
-			if (strcmp(name, ctx->xattrs_external[i]) == 0) {
-				*value = ctx->xattrs_external[i + 1];
-				*value_len = strlen(ctx->xattrs_external[i + 1]) + 1;
-				return;
+				if (strcmp(name, ctx->xattrs_external[i]) == 0) {
+					*value = ctx->xattrs_external[i + 1];
+					*value_len = strlen(ctx->xattrs_external[i + 1]) + 1;
+					return;
+				}
 			}
 		}
 
@@ -1446,15 +1456,19 @@ lvol_get_xattr_value_ext(void *xattr_ctx, const char *name,
 }
 
 /*
- * Create a list of xattr names that is the union of the internal xattr names list and the
- * external xattr name,value list.
+ * Create a list of xattr names with the elements of the internal xattrs names list and the
+ * names of the external xattrs name,value list.
  */
 static char **
-lvol_create_xattrs_names(const char *const *xattr_internal, const char *const *xattr_external,
+lvol_create_xattrs_names(char **xattr_internal, char **xattr_external,
 			 size_t num_internal, size_t num_external)
 {
 	size_t full_i, ext_i;
 	char **full_list;
+
+	if (num_internal == 0 && num_external == 0) {
+		return NULL;
+	}
 
 	full_list = calloc(num_internal + num_external, sizeof(*full_list));
 	if (!full_list) {
@@ -1463,7 +1477,7 @@ lvol_create_xattrs_names(const char *const *xattr_internal, const char *const *x
 
 	for (full_i = 0; full_i < num_internal; full_i++) {
 		if (!(full_list[full_i] = strdup(xattr_internal[full_i]))) {
-			lvol_free_xattrs_list(full_list);
+			lvol_free_xattrs_list(full_list, num_internal + num_external);
 			return NULL;
 		}
 	}
@@ -1475,7 +1489,7 @@ lvol_create_xattrs_names(const char *const *xattr_internal, const char *const *x
 		}
 
 		if (!(full_list[full_i] = strdup(xattr_external[ext_i]))) {
-			lvol_free_xattrs_list(full_list);
+			lvol_free_xattrs_list(full_list, num_internal + num_external);
 			return NULL;
 		}
 		full_i++;
@@ -1485,18 +1499,18 @@ lvol_create_xattrs_names(const char *const *xattr_internal, const char *const *x
 }
 
 void
-spdk_lvol_create_snapshot_with_xattrs(struct spdk_lvol *origlvol, const char *snapshot_name,
-				      const char *const *xattrs_external, size_t xattrs_external_num,
-				      spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
+spdk_lvol_create_snapshot_ext(struct spdk_lvol *origlvol, const char *snapshot_name,
+			      const struct spdk_lvol_opts *opts,
+			      spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
 {
 	struct spdk_lvol_store *lvs;
 	struct spdk_lvol *newlvol;
 	struct spdk_blob *origblob;
 	struct spdk_lvol_with_handle_req *req;
-	struct spdk_blob_xattr_opts snapshot_xattrs;
+	struct spdk_blob_opts snapshot_opts;
 	struct xattrs_ctx xattr_ctx;
 	char **xattr_names;
-	char **xattr_external_dup;
+	char **xattr_external_dup = NULL;
 	char *xattr_names_internal[] = {LVOL_NAME, "uuid", LVOL_CREATION_TIME};
 	int rc;
 
@@ -1506,13 +1520,25 @@ spdk_lvol_create_snapshot_with_xattrs(struct spdk_lvol *origlvol, const char *sn
 		return;
 	}
 
-	if (xattrs_external == NULL) {
-		SPDK_WARNLOG("Xattr not provided.\n");
+	if (opts == NULL) {
+		SPDK_WARNLOG("Options not provided.\n");
 		return spdk_lvol_create_snapshot(origlvol, snapshot_name, cb_fn, cb_arg);
 	}
 
-	if (xattrs_external_num % 2 != 0) {
-		SPDK_ERRLOG("Xattr list must contain couples of key-value\n");
+	if (opts->xattrs == NULL && opts->xattrs_num > 0) {
+		SPDK_ERRLOG("Options xattrs list is NULL\n");
+		cb_fn(cb_arg, NULL, -EINVAL);
+		return;
+	}
+
+	if (opts->xattrs != NULL && opts->xattrs_num == 0) {
+		SPDK_ERRLOG("Options xattrs list number is 0\n");
+		cb_fn(cb_arg, NULL, -EINVAL);
+		return;
+	}
+
+	if (opts->xattrs_num % 2 != 0) {
+		SPDK_ERRLOG("Options xattr list must contain couples of key-value\n");
 		cb_fn(cb_arg, NULL, -EINVAL);
 		return;
 	}
@@ -1547,39 +1573,48 @@ spdk_lvol_create_snapshot_with_xattrs(struct spdk_lvol *origlvol, const char *sn
 		return;
 	}
 
-	xattr_external_dup = lvol_dup_xattr_list(xattrs_external, xattrs_external_num);
-	if (xattr_external_dup == NULL) {
-		SPDK_ERRLOG("Cannot duplicate external xattr list\n");
-		free(req);
-		cb_fn(cb_arg, NULL, -ENOMEM);
-		return;
+	if (opts->xattrs) {
+		xattr_external_dup = lvol_dup_xattr_list(opts->xattrs, opts->xattrs_num);
+		if (xattr_external_dup == NULL) {
+			SPDK_ERRLOG("Cannot duplicate external xattrs list\n");
+			free(req);
+			cb_fn(cb_arg, NULL, -ENOMEM);
+			return;
+		}
 	}
 
-	xattr_names = lvol_create_xattrs_names((const char *const *)&xattr_names_internal, xattrs_external,
-					       SPDK_COUNTOF(xattr_names_internal), xattrs_external_num);
+	xattr_names = lvol_create_xattrs_names((char **)&xattr_names_internal, opts->xattrs,
+					       SPDK_COUNTOF(xattr_names_internal), opts->xattrs_num);
 	if (xattr_names == NULL) {
-		SPDK_ERRLOG("Cannot create xattr name list\n");
+		SPDK_ERRLOG("Cannot create xattrs name list\n");
 		free(req);
-		lvol_free_xattrs_list(xattr_external_dup);
+		if (xattr_external_dup != NULL) {
+			lvol_free_xattrs_list(xattr_external_dup, opts->xattrs_num);
+		}
 		cb_fn(cb_arg, NULL, -ENOMEM);
 		return;
 	}
 
 	xattr_ctx.newlvol = newlvol;
 	xattr_ctx.xattrs_external = xattr_external_dup;
-	snapshot_xattrs.count = SPDK_COUNTOF(xattr_names_internal) + xattrs_external_num / 2;
-	snapshot_xattrs.ctx = &xattr_ctx;
-	snapshot_xattrs.names = xattr_names;
-	snapshot_xattrs.get_value = lvol_get_xattr_value_ext;
+	xattr_ctx.xattrs_external_num = opts->xattrs_num;
+	spdk_blob_opts_init(&snapshot_opts, sizeof(snapshot_opts));
+	snapshot_opts.xattrs.count = SPDK_COUNTOF(xattr_names_internal) + opts->xattrs_num / 2;
+	snapshot_opts.xattrs.ctx = &xattr_ctx;
+	snapshot_opts.xattrs.names = xattr_names;
+	snapshot_opts.xattrs.get_value = lvol_get_xattr_value_ext;
+	snapshot_opts.enable_add_xattrs = opts->enable_add_xattrs;
 	req->lvol = newlvol;
 	req->origlvol = origlvol;
 	req->cb_fn = cb_fn;
 	req->cb_arg = cb_arg;
-	req->xattr_names = xattr_names;
+	req->xattrs_name = xattr_names;
+	req->xattrs_name_num = SPDK_COUNTOF(xattr_names_internal) + opts->xattrs_num;
 	req->xattrs_external = xattr_external_dup;
+	req->xattrs_external_num = opts->xattrs_num;
 
-	spdk_bs_create_snapshot(lvs->blobstore, spdk_blob_get_id(origblob), &snapshot_xattrs,
-				lvol_create_cb, req);
+	spdk_bs_create_snapshot_ext(lvs->blobstore, spdk_blob_get_id(origblob), &snapshot_opts,
+				    lvol_create_cb, req);
 }
 
 void

@@ -77,8 +77,10 @@ struct spdk_lvol_with_handle_req {
 	void				*cb_arg;
 	struct spdk_lvol		*lvol;
 	struct spdk_lvol		*origlvol;
-	char				**xattr_names;
+	char				**xattrs_name;
+	size_t				xattrs_name_num;
 	char				**xattrs_external;
+	size_t				xattrs_external_num;
 };
 
 struct spdk_lvol_bs_dev_req {
