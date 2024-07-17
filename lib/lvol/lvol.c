@@ -17,6 +17,7 @@
 
 #define LVOL_NAME "name"
 #define LVOL_CREATION_TIME "creation_time"
+#define LVOL_SNAPSHOT_CHECKSUM "checksum"
 
 SPDK_LOG_REGISTER_COMPONENT(lvol)
 
@@ -2721,4 +2722,94 @@ spdk_lvol_set_external_parent(struct spdk_lvol *lvol, const void *esnap_id, uint
 
 	spdk_bs_blob_set_external_parent(lvol->lvol_store->blobstore, blob_id, bs_dev, esnap_id,
 					 esnap_id_len, lvol_set_external_parent_cb, req);
+}
+
+static void
+lvol_snapshot_checksum_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_req *req = cb_arg;
+
+	spdk_bs_free_io_channel(req->channel);
+
+	if (lvolerrno < 0) {
+		SPDK_ERRLOG("could not exec snapshot checksum of lvol %s, error %d\n", req->lvol->name, lvolerrno);
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+void
+spdk_lvol_register_snapshot_checksum(struct spdk_lvol *snapshot, spdk_lvol_op_complete cb_fn,
+				     void *cb_arg)
+{
+	struct spdk_lvol_req *req;
+	spdk_blob_id blob_id;
+
+	assert(cb_fn != NULL);
+
+	if (snapshot == NULL) {
+		SPDK_ERRLOG("snapshot must not be NULL\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	assert(snapshot->lvol_store->thread == spdk_get_thread());
+
+	req = calloc(1, sizeof(*req));
+	if (!req) {
+		SPDK_ERRLOG("cannot alloc memory for lvol request pointer\n");
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	req->lvol = snapshot;
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+	req->channel = spdk_bs_alloc_io_channel(snapshot->lvol_store->blobstore);
+	if (req->channel == NULL) {
+		SPDK_ERRLOG("lvol %s snapshot checksum, cannot alloc io channel for lvol request\n",
+			    snapshot->unique_id);
+		free(req);
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	blob_id = spdk_blob_get_id(snapshot->blob);
+
+	spdk_bs_snapshot_checksum(snapshot->lvol_store->blobstore, req->channel, blob_id,
+				  LVOL_SNAPSHOT_CHECKSUM, lvol_snapshot_checksum_cb, req);
+}
+
+int
+spdk_lvol_get_snapshot_checksum(struct spdk_lvol *snapshot, uint64_t *checksum)
+{
+	const char *attr;
+	size_t value_len;
+	int rc;
+
+	if (snapshot == NULL) {
+		SPDK_ERRLOG("snapshot must not be NULL\n");
+		return -EINVAL;
+	}
+
+	if (checksum == NULL) {
+		SPDK_ERRLOG("checksum must not be NULL\n");
+		return -EINVAL;
+	}
+
+	rc = spdk_blob_get_xattr_value(snapshot->blob, LVOL_SNAPSHOT_CHECKSUM, (const void **)&attr,
+				       &value_len);
+	if (rc != 0) {
+		SPDK_INFOLOG(lvol, "No checksum xattr found\n");
+		return rc;
+	}
+
+	if (value_len != sizeof(*checksum)) {
+		SPDK_ERRLOG("Bad lenght of checksum xattr: %lu\n", value_len);
+		return -EDOM;
+	}
+
+	*checksum = *(uint64_t *)attr;
+	return 0;
 }

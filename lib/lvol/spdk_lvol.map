@@ -32,6 +32,8 @@
 	spdk_lvol_shallow_copy;
 	spdk_lvol_set_parent;
 	spdk_lvol_set_external_parent;
+	spdk_lvol_register_snapshot_checksum;
+	spdk_lvol_get_snapshot_checksum;
 
 	# internal functions
 	spdk_lvol_resize;
