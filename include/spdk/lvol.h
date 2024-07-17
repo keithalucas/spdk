@@ -517,6 +517,33 @@ void spdk_lvol_set_external_parent(struct spdk_lvol *lvol, const void *esnap_id,
 				   uint32_t esnap_id_len,
 				   spdk_lvol_op_complete cb_fn, void *cb_arg);
 
+/**
+ * Compute and store snapshot's checksum.
+ *
+ * The computed checksum is crc64 iso reflected.
+ * The snapshot must have the option to add new xattrs after its creation enabled.
+ *
+ * \param lvol Handle to snapshot
+ * \param cb_fn Completion callback
+ * \param cb_arg Completion callback custom arguments
+ */
+void spdk_lvol_register_snapshot_checksum(struct spdk_lvol *snapshot, spdk_lvol_op_complete cb_fn,
+		void *cb_arg);
+
+/**
+ * Get snapshot's stored checksum.
+ *
+ * The lvol must be a snapshot and the checksum must has been previously registered.
+ *
+ * \param snapshot Handle to snapshot.
+ * \param checksum Parameter as output.
+ *
+ * \return 0 on success, negative errno on failure.
+ */
+int
+spdk_lvol_get_snapshot_checksum(struct spdk_lvol *snapshot, uint64_t *checksum);
+
+
 #ifdef __cplusplus
 }
 #endif
