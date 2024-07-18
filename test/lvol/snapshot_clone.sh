@@ -924,6 +924,39 @@ function test_lvol_set_parent_failed() {
 	check_leftover_devices
 }
 
+function test_lvol_snapshot_checksum() {
+	# Create lvs
+	bs_malloc_name=$(rpc_cmd bdev_malloc_create 20 $MALLOC_BS)
+	lvs_uuid=$(rpc_cmd bdev_lvol_create_lvstore "$bs_malloc_name" lvs_test)
+
+	# Create lvol with 4 cluster
+	lvol_size=$((LVS_DEFAULT_CLUSTER_SIZE_MB * 4))
+	lvol_uuid=$(rpc_cmd bdev_lvol_create -u "$lvs_uuid" lvol_test "$lvol_size" -t)
+
+	# Fill second and fourth cluster of lvol
+	nbd_start_disks "$DEFAULT_RPC_ADDR" "$lvol_uuid" /dev/nbd0
+	dd if=/dev/zero of=/dev/nbd0 oflag=direct bs="$LVS_DEFAULT_CLUSTER_SIZE" count=1 seek=1
+	dd if=/dev/zero of=/dev/nbd0 oflag=direct bs="$LVS_DEFAULT_CLUSTER_SIZE" count=1 seek=3
+	nbd_stop_disks "$DEFAULT_RPC_ADDR" /dev/nbd0
+
+	# Create snapshots of lvol bdev
+	snapshot_uuid=$(rpc_cmd bdev_lvol_snapshot --enable-add-xattrs lvs_test/lvol_test lvol_snapshot)
+
+	# Register snapshot's checksum
+	rpc_cmd bdev_lvol_register_snapshot_checksum "$snapshot_uuid"
+
+	# Get snapshot's checksum
+	checksum=$(rpc_cmd bdev_lvol_get_snapshot_checksum "$snapshot_uuid")
+	[ "$(jq '.checksum' <<< "$checksum")" == "13859014760662026744" ]
+
+	# Clean up
+	rpc_cmd bdev_lvol_delete "$snapshot_uuid"
+	rpc_cmd bdev_lvol_delete "$lvol_uuid"
+	rpc_cmd bdev_lvol_delete_lvstore -u "$lvs_uuid"
+	rpc_cmd bdev_malloc_delete "$bs_malloc_name"
+	check_leftover_devices
+}
+
 $SPDK_BIN_DIR/spdk_tgt &
 spdk_pid=$!
 trap 'killprocess "$spdk_pid"; exit 1' SIGINT SIGTERM EXIT
@@ -944,6 +977,7 @@ run_test "test_lvol_set_parent_from_snapshot" test_lvol_set_parent_from_snapshot
 run_test "test_lvol_set_parent_from_esnap" test_lvol_set_parent_from_esnap
 run_test "test_lvol_set_parent_from_none" test_lvol_set_parent_from_none
 run_test "test_lvol_set_parent_failed" test_lvol_set_parent_failed
+run_test "test_lvol_snapshot_checksum" test_lvol_snapshot_checksum
 
 trap - SIGINT SIGTERM EXIT
 killprocess $spdk_pid

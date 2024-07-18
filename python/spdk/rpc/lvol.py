@@ -334,6 +334,30 @@ def bdev_lvol_get_fragmap(client, name, offset=0, size=0):
     return client.call('bdev_lvol_get_fragmap', params)
 
 
+def bdev_lvol_register_snapshot_checksum(client, name):
+    """Compute and store snapshot's checksum.
+
+    Args:
+        name: name of the snapshot
+    """
+    params = {
+        'name': name,
+    }
+    return client.call('bdev_lvol_register_snapshot_checksum', params)
+
+
+def bdev_lvol_get_snapshot_checksum(client, name):
+    """Get snapshot's stored checksum.
+
+    Args:
+        name: name of the snapshot
+    """
+    params = {
+        'name': name,
+    }
+    return client.call('bdev_lvol_get_snapshot_checksum', params)
+
+
 def bdev_lvol_delete_lvstore(client, uuid=None, lvs_name=None):
     """Destroy a logical volume store.
 

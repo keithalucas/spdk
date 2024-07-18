@@ -1960,3 +1960,132 @@ cleanup:
 }
 
 SPDK_RPC_REGISTER("bdev_lvol_get_fragmap", rpc_bdev_lvol_get_fragmap, SPDK_RPC_RUNTIME)
+
+struct rpc_bdev_snapshot_checksum {
+	char *name;
+};
+
+static void
+free_rpc_bdev_snapshot_checksum(struct rpc_bdev_snapshot_checksum *req)
+{
+	free(req->name);
+}
+
+static const struct spdk_json_object_decoder rpc_bdev_snapshot_checksum_decoders[] = {
+	{"name", offsetof(struct rpc_bdev_snapshot_checksum, name), spdk_json_decode_string},
+};
+
+static void
+rpc_bdev_lvol_register_snapshot_checksum_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_jsonrpc_request *request = cb_arg;
+
+	if (lvolerrno != 0) {
+		goto invalid;
+	}
+
+	spdk_jsonrpc_send_bool_response(request, true);
+	return;
+
+invalid:
+	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+					 spdk_strerror(-lvolerrno));
+}
+
+static void
+rpc_bdev_lvol_register_snapshot_checksum(struct spdk_jsonrpc_request *request,
+		const struct spdk_json_val *params)
+{
+	struct rpc_bdev_snapshot_checksum req = {};
+	struct spdk_bdev *bdev;
+	struct spdk_lvol *lvol;
+
+	SPDK_INFOLOG(lvol_rpc, "Registering snapshot checksum\n");
+
+	if (spdk_json_decode_object(params, rpc_bdev_snapshot_checksum_decoders,
+				    SPDK_COUNTOF(rpc_bdev_snapshot_checksum_decoders),
+				    &req)) {
+		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(req.name);
+	if (bdev == NULL) {
+		SPDK_ERRLOG("bdev '%s' does not exist\n", req.name);
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	lvol = vbdev_lvol_get_from_bdev(bdev);
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	spdk_lvol_register_snapshot_checksum(lvol, rpc_bdev_lvol_register_snapshot_checksum_cb, request);
+
+cleanup:
+	free_rpc_bdev_snapshot_checksum(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_register_snapshot_checksum", rpc_bdev_lvol_register_snapshot_checksum,
+		  SPDK_RPC_RUNTIME)
+
+static void
+rpc_bdev_lvol_get_snapshot_checksum(struct spdk_jsonrpc_request *request,
+				    const struct spdk_json_val *params)
+{
+	struct rpc_bdev_snapshot_checksum req = {};
+	struct spdk_json_write_ctx *w;
+	struct spdk_bdev *bdev;
+	struct spdk_lvol *lvol;
+	uint64_t checksum;
+	int rc;
+
+	SPDK_INFOLOG(lvol_rpc, "Getting snapshot checksum\n");
+
+	if (spdk_json_decode_object(params, rpc_bdev_snapshot_checksum_decoders,
+				    SPDK_COUNTOF(rpc_bdev_snapshot_checksum_decoders),
+				    &req)) {
+		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(req.name);
+	if (bdev == NULL) {
+		SPDK_ERRLOG("bdev '%s' does not exist\n", req.name);
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	lvol = vbdev_lvol_get_from_bdev(bdev);
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	rc = spdk_lvol_get_snapshot_checksum(lvol, &checksum);
+	if (rc != 0) {
+		SPDK_ERRLOG("Error %d getting snapshot checksum\n", rc);
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_uint64(w, "checksum", checksum);
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+
+cleanup:
+	free_rpc_bdev_snapshot_checksum(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_get_snapshot_checksum", rpc_bdev_lvol_get_snapshot_checksum,
+		  SPDK_RPC_RUNTIME)
