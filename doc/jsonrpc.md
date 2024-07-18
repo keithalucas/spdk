@@ -11251,6 +11251,80 @@ Example response:
 }
 ~~~
 
+### bdev_lvol_register_snapshot_checksum {#rpc_bdev_lvol_register_snapshot_checksum}
+
+Compute and store snapshot's checksum. The computed checksum is crc64 iso reflected.
+The snapshot must have the option to add and update xattrs after its creation enabled.
+
+### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of the snapshot
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_register_snapshot_checksum",
+  "id": 1,
+  "params": {
+    "name": "8d87fccc-c278-49f0-9d4c-6237951aca09"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### bdev_lvol_get_snapshot_checksum {#rpc_bdev_lvol_get_snapshot_checksum}
+
+Get snapshot's stored checksum. The checksum must has been previously registered with
+@ref rpc_bdev_lvol_get_snapshot_checksum.
+
+### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of the snapshot
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_get_snapshot_checksum",
+  "id": 1,
+  "params": {
+    "name": "8d87fccc-c278-49f0-9d4c-6237951aca09"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "checksum": 13859014760662026744,
+  }
+}
+~~~
+
 ## RAID
 
 ### bdev_raid_set_options {#rpc_bdev_raid_set_options}

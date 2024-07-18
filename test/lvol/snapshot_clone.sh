@@ -924,6 +924,70 @@ function test_lvol_set_parent_failed() {
 	check_leftover_devices
 }
 
+function test_lvol_snapshot_checksum() {
+	# Create lvs
+	bs_malloc_name=$(rpc_cmd bdev_malloc_create 40 $MALLOC_BS)
+	lvs_uuid=$(rpc_cmd bdev_lvol_create_lvstore "$bs_malloc_name" lvs_test)
+
+	# Create lvol with 4 cluster
+	lvol_size=$((LVS_DEFAULT_CLUSTER_SIZE_MB * 4))
+	lvol_uuid=$(rpc_cmd bdev_lvol_create -u "$lvs_uuid" lvol_test "$lvol_size" -t)
+
+	# Fill second cluster of lvol with data of known pattern
+	nbd_start_disks "$DEFAULT_RPC_ADDR" "$lvol_uuid" /dev/nbd0
+	start_fill=$((lvol_size * 1024 * 1024 / 4))
+	fill_range=$start_fill
+	run_fio_test /dev/nbd0 $start_fill $fill_range "write" "0xcc"
+	nbd_stop_disks "$DEFAULT_RPC_ADDR" /dev/nbd0
+
+	# Create snapshots1 of lvol bdev
+	snapshot1_uuid=$(rpc_cmd bdev_lvol_snapshot lvs_test/lvol_test lvol_snapshot1)
+
+	# Register snapshot's checksum
+	rpc_cmd bdev_lvol_register_snapshot_checksum "$snapshot1_uuid"
+
+	# Get snapshot1's checksum
+	checksum=$(rpc_cmd bdev_lvol_get_snapshot_checksum "$snapshot1_uuid")
+	[ "$(jq '.checksum' <<< "$checksum")" == "828947163827886523" ]
+
+	# Fill fourth cluster of lvol with data of known pattern
+	nbd_start_disks "$DEFAULT_RPC_ADDR" "$lvol_uuid" /dev/nbd0
+	start_fill=$((lvol_size * 3 * 1024 * 1024 / 4))
+	fill_range=$((lvol_size * 1024 * 1024 / 4))
+	run_fio_test /dev/nbd0 $start_fill $fill_range "write" "0xbb"
+	nbd_stop_disks "$DEFAULT_RPC_ADDR" /dev/nbd0
+
+	# Create snapshots2 of lvol bdev
+	snapshot2_uuid=$(rpc_cmd bdev_lvol_snapshot lvs_test/lvol_test lvol_snapshot2)
+
+	# Register snapshot2's checksum
+	rpc_cmd bdev_lvol_register_snapshot_checksum "$snapshot2_uuid"
+
+	# Get snapshot2's checksum
+	checksum=$(rpc_cmd bdev_lvol_get_snapshot_checksum "$snapshot2_uuid")
+	[ "$(jq '.checksum' <<< "$checksum")" == "7161606974051404010" ]
+
+	# Delete snapshot1
+	rpc_cmd bdev_lvol_delete "$snapshot1_uuid"
+
+	# Snapshot2 checksum have been removed by previous operation
+	NOT rpc_cmd bdev_lvol_get_snapshot_checksum "$snapshot2_uuid"
+
+	# Calculate again snapshot2's checksum because it now contains also snapshot1's data
+	rpc_cmd bdev_lvol_register_snapshot_checksum "$snapshot2_uuid"
+
+	# Get snapshot2's checksum
+	checksum=$(rpc_cmd bdev_lvol_get_snapshot_checksum "$snapshot2_uuid")
+	[ "$(jq '.checksum' <<< "$checksum")" == "440587436939872369" ]
+
+	# Clean up
+	rpc_cmd bdev_lvol_delete "$snapshot2_uuid"
+	rpc_cmd bdev_lvol_delete "$lvol_uuid"
+	rpc_cmd bdev_lvol_delete_lvstore -u "$lvs_uuid"
+	rpc_cmd bdev_malloc_delete "$bs_malloc_name"
+	check_leftover_devices
+}
+
 $SPDK_BIN_DIR/spdk_tgt &
 spdk_pid=$!
 trap 'killprocess "$spdk_pid"; exit 1' SIGINT SIGTERM EXIT
@@ -944,6 +1008,7 @@ run_test "test_lvol_set_parent_from_snapshot" test_lvol_set_parent_from_snapshot
 run_test "test_lvol_set_parent_from_esnap" test_lvol_set_parent_from_esnap
 run_test "test_lvol_set_parent_from_none" test_lvol_set_parent_from_none
 run_test "test_lvol_set_parent_failed" test_lvol_set_parent_failed
+run_test "test_lvol_snapshot_checksum" test_lvol_snapshot_checksum
 
 trap - SIGINT SIGTERM EXIT
 killprocess $spdk_pid
