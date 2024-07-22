@@ -597,6 +597,11 @@ raid1_start(struct raid_bdev *raid_bdev)
 		}
 	}
 
+	if (raid_bdev->delta_bitmap_enabled && min_optimal_io_boundary == 0) {
+		SPDK_ERRLOG("No optional io boundary for raid bdev, delta bitmap cannot be enabled\n");
+		return -EINVAL;
+	}
+
 	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 		base_info->data_size = min_blockcnt;
 	}
@@ -726,15 +731,17 @@ channel_grow_base_bdev(struct raid_bdev *raid_bdev, struct raid_bdev_io_channel 
 		       sizeof(*raid1_ch->read_blocks_outstanding));
 		raid1_ch->read_blocks_outstanding = tmp;
 
-		tmp = realloc(raid1_ch->delta_bitmaps,
-			      raid_bdev->num_base_bdevs * sizeof(*raid1_ch->delta_bitmaps));
-		if (!tmp) {
-			SPDK_ERRLOG("Unable to reallocate raid1 channel delta_bitmaps\n");
-			return false;
+		if (raid1_ch->delta_bitmaps) {
+			tmp = realloc(raid1_ch->delta_bitmaps,
+				      raid_bdev->num_base_bdevs * sizeof(*raid1_ch->delta_bitmaps));
+			if (!tmp) {
+				SPDK_ERRLOG("Unable to reallocate raid1 channel delta_bitmaps\n");
+				return false;
+			}
+			memset(tmp + raid_ch_num_channels * sizeof(*raid1_ch->delta_bitmaps), 0,
+			       sizeof(*raid1_ch->delta_bitmaps));
+			raid1_ch->delta_bitmaps = tmp;
 		}
-		memset(tmp + raid_ch_num_channels * sizeof(*raid1_ch->delta_bitmaps), 0,
-		       sizeof(*raid1_ch->delta_bitmaps));
-		raid1_ch->delta_bitmaps = tmp;
 	}
 
 	return true;
