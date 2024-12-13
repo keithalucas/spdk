@@ -800,6 +800,23 @@ void spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_cha
 				  spdk_blob_id blobid, spdk_blob_op_complete cb_fn, void *cb_arg);
 
 /**
+ * Detach from parent blob without modifying data.
+ *
+ * This call remove the dependencies of a blob from its parent snapshot without allocate any new
+ * cluster in the child blob, as for example it happens in decouple from parent. In this way
+ * blob's data are not modified.
+ *
+ * If blob have no parent, or if the parent is an external snapshot, -EINVAL error is reported.
+ *
+ * \param bs blobstore.
+ * \param blobid The id of the blob.
+ * \param cb_fn Called when the operation is complete.
+ * \param cb_arg Argument passed to function cb_fn.
+ */
+void spdk_bs_blob_detach_parent(struct spdk_blob_store *bs, spdk_blob_id blobid,
+				spdk_blob_op_complete cb_fn, void *cb_arg);
+
+/**
  * Perform a shallow copy of a blob to a blobstore device.
  *
  * This makes a shallow copy from a blob to a blobstore device.
