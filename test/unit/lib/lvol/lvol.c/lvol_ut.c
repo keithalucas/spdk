@@ -108,6 +108,13 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel 
 }
 
 void
+spdk_bs_blob_detach_parent(struct spdk_blob_store *bs, spdk_blob_id blobid,
+			   spdk_blob_op_complete cb_fn, void *cb_arg)
+{
+	cb_fn(cb_arg, g_inflate_rc);
+}
+
+void
 spdk_bs_iter_next(struct spdk_blob_store *bs, struct spdk_blob *b,
 		  spdk_blob_op_with_handle_complete cb_fn, void *cb_arg)
 {
@@ -2437,6 +2444,59 @@ lvol_decouple_parent(void)
 }
 
 static void
+lvol_detach_parent(void)
+{
+	struct lvol_ut_bs_dev dev;
+	struct spdk_lvs_opts opts;
+	int rc = 0;
+
+	init_dev(&dev);
+
+	spdk_lvs_opts_init(&opts);
+	snprintf(opts.name, sizeof(opts.name), "lvs");
+
+	g_lvserrno = -1;
+	rc = spdk_lvs_init(&dev.bs_dev, &opts, lvol_store_op_with_handle_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol_store != NULL);
+
+	spdk_lvol_create(g_lvol_store, "lvol", 10, false, LVOL_CLEAR_WITH_DEFAULT,
+			 lvol_op_with_handle_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	SPDK_CU_ASSERT_FATAL(g_lvol != NULL);
+
+	spdk_lvol_detach_parent(NULL, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == -ENODEV);
+
+	g_inflate_rc = -1;
+	spdk_lvol_detach_parent(g_lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno != 0);
+
+	g_inflate_rc = 0;
+	spdk_lvol_detach_parent(g_lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+
+	spdk_lvol_close(g_lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+	spdk_lvol_destroy(g_lvol, op_complete, NULL);
+	CU_ASSERT(g_lvserrno == 0);
+
+	g_lvserrno = -1;
+	rc = spdk_lvs_unload(g_lvol_store, op_complete, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_lvserrno == 0);
+	g_lvol_store = NULL;
+
+	free_dev(&dev);
+
+	/* Make sure that all references to the io_channel was closed after
+	 * inflate call
+	 */
+	CU_ASSERT(g_io_channel == NULL);
+}
+
+static void
 lvol_get_xattr(void)
 {
 	struct lvol_ut_bs_dev dev;
@@ -3767,6 +3827,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, lvs_rename);
 	CU_ADD_TEST(suite, lvol_inflate);
 	CU_ADD_TEST(suite, lvol_decouple_parent);
+	CU_ADD_TEST(suite, lvol_detach_parent);
 	CU_ADD_TEST(suite, lvol_get_xattr);
 	CU_ADD_TEST(suite, lvol_esnap_reload);
 	CU_ADD_TEST(suite, lvol_esnap_create_bad_args);
