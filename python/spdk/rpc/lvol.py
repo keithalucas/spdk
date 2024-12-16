@@ -257,6 +257,18 @@ def bdev_lvol_decouple_parent(client, name):
     return client.call('bdev_lvol_decouple_parent', params)
 
 
+def bdev_lvol_detach_parent(client, name):
+    """Detach parent of a logical volume.
+
+    Args:
+        name: name of logical volume to detach parent
+    """
+    params = {
+        'name': name,
+    }
+    return client.call('bdev_lvol_detach_parent', params)
+
+
 def bdev_lvol_start_shallow_copy(client, src_lvol_name, dst_bdev_name):
     """Start a shallow copy of an lvol over a given bdev. The status of the operation
     can be obtained with bdev_lvol_check_shallow_copy

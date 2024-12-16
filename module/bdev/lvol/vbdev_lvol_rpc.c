@@ -1021,6 +1021,47 @@ cleanup:
 
 SPDK_RPC_REGISTER("bdev_lvol_decouple_parent", rpc_bdev_lvol_decouple_parent, SPDK_RPC_RUNTIME)
 
+static void
+rpc_bdev_lvol_detach_parent(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
+{
+	struct rpc_bdev_lvol_inflate req = {};
+	struct spdk_bdev *bdev;
+	struct spdk_lvol *lvol;
+
+	SPDK_INFOLOG(lvol_rpc, "Detaching parent of lvol\n");
+
+	if (spdk_json_decode_object(params, rpc_bdev_lvol_inflate_decoders,
+				    SPDK_COUNTOF(rpc_bdev_lvol_inflate_decoders),
+				    &req)) {
+		SPDK_INFOLOG(lvol_rpc, "spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "spdk_json_decode_object failed");
+		goto cleanup;
+	}
+
+	bdev = spdk_bdev_get_by_name(req.name);
+	if (bdev == NULL) {
+		SPDK_ERRLOG("bdev '%s' does not exist\n", req.name);
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	lvol = vbdev_lvol_get_from_bdev(bdev);
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
+		goto cleanup;
+	}
+
+	spdk_lvol_detach_parent(lvol, rpc_bdev_lvol_inflate_cb, request);
+
+cleanup:
+	free_rpc_bdev_lvol_inflate(&req);
+}
+
+SPDK_RPC_REGISTER("bdev_lvol_detach_parent", rpc_bdev_lvol_detach_parent, SPDK_RPC_RUNTIME)
+
 struct rpc_bdev_lvol_resize {
 	char *name;
 	uint64_t size_in_mib;

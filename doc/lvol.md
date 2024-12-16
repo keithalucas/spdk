@@ -198,6 +198,10 @@ bdev_lvol_decouple_parent [-h] name
     Decouple parent of a logical volume
     optional arguments:
     -h, --help  show help
+bdev_lvol_detach_parent [-h] name
+    Detach parent of a logical volume
+    optional arguments:
+    -h, --help  show help
 bdev_lvol_start_shallow_copy [-h] src_lvol_name dst_bdev_name
     Make a shallow copy of lvol over a given bdev
     This RPC starts the operation and returns an identifier that can be used to query the status

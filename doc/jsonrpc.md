@@ -490,6 +490,7 @@ Example response:
     "bdev_lvol_delete",
     "bdev_lvol_resize",
     "bdev_lvol_set_read_only",
+    "bdev_lvol_detach_parent",
     "bdev_lvol_decouple_parent",
     "bdev_lvol_inflate",
     "bdev_lvol_rename",
@@ -10934,6 +10935,43 @@ Example request:
 {
   "jsonrpc": "2.0",
   "method": "bdev_lvol_decouple_parent",
+  "id": 1.
+  "params": {
+    "name": "8d87fccc-c278-49f0-9d4c-6237951aca09"
+  }
+}
+~~~
+
+Example response:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": true
+}
+~~~
+
+### bdev_lvol_detach_parent {#rpc_bdev_lvol_detach_parent}
+
+Detach the parent snapshot of a logical volume. No new clusters are allocated to the child blob,
+no data are copied from the parent to the child, so lvol's data are not modified. The parent must
+be a standard snapshot, not an external snapshot. All dependencies on the parent are removed.
+
+#### Parameters
+
+Name                    | Optional | Type        | Description
+----------------------- | -------- | ----------- | -----------
+name                    | Required | string      | UUID or alias of the logical volume to detach the parent of it
+
+#### Example
+
+Example request:
+
+~~~json
+{
+  "jsonrpc": "2.0",
+  "method": "bdev_lvol_detach_parent",
   "id": 1.
   "params": {
     "name": "8d87fccc-c278-49f0-9d4c-6237951aca09"
