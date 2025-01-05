@@ -2812,6 +2812,24 @@ blob_copy(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op, uint64_
 }
 
 static void
+blob_write_zeros_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+{
+	struct spdk_blob_copy_cluster_ctx *ctx = cb_arg;
+	uint32_t cluster_number;
+
+	if (bserrno) {
+		/* The write failed, so jump to the final completion handler */
+		bs_sequence_finish(seq, bserrno);
+		return;
+	}
+
+	cluster_number = bs_page_to_cluster(ctx->blob->bs, ctx->page);
+
+	blob_insert_cluster_on_md_thread(ctx->blob, cluster_number, ctx->new_cluster,
+					 ctx->new_extent_page, ctx->new_cluster_page, blob_insert_cluster_cpl, ctx);
+}
+
+static void
 bs_allocate_and_copy_cluster(struct spdk_blob *blob,
 			     struct spdk_io_channel *_ch,
 			     uint64_t io_unit, spdk_bs_user_op_t *op)
@@ -2923,8 +2941,15 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
 		}
 
 	} else {
-		blob_insert_cluster_on_md_thread(ctx->blob, cluster_number, ctx->new_cluster,
-						 ctx->new_extent_page, ctx->new_cluster_page, blob_insert_cluster_cpl, ctx);
+		if (is_zeroes) {
+			bs_sequence_write_zeroes_dev(ctx->seq,
+						     bs_cluster_to_lba(blob->bs, ctx->new_cluster),
+						     bs_cluster_to_lba(blob->bs, 1),
+						     blob_write_zeros_cpl, ctx);
+		} else {
+			blob_insert_cluster_on_md_thread(ctx->blob, cluster_number, ctx->new_cluster,
+							 ctx->new_extent_page, ctx->new_cluster_page, blob_insert_cluster_cpl, ctx);
+		}
 	}
 }
 
