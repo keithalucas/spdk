@@ -8045,8 +8045,8 @@ bs_snapshot_checksum_blob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int bs
 	ctx->blob = _blob;
 
 	if (_blob->locked_operation_in_progress) {
-		SPDK_DEBUGLOG(blob, "blob 0x%" PRIx64 " snapshot checksum - another operation in progress\n",
-			      _blob->id);
+		SPDK_ERRLOG("blob 0x%" PRIx64 " snapshot checksum - another operation in progress\n",
+			    _blob->id);
 		ctx->bserrno = -EBUSY;
 		spdk_blob_close(_blob, bs_snapshot_checksum_cleanup_finish, ctx);
 		return;
