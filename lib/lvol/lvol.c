@@ -2829,7 +2829,7 @@ int
 spdk_lvol_get_snapshot_checksum(struct spdk_lvol *snapshot, uint64_t *checksum)
 {
 	const char *attr;
-	size_t value_len;
+	size_t value_len = 0;
 	int rc;
 
 	if (snapshot == NULL) {
