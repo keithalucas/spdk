@@ -2850,7 +2850,7 @@ spdk_lvol_get_snapshot_checksum(struct spdk_lvol *snapshot, uint64_t *checksum)
 	}
 
 	if (value_len != sizeof(*checksum)) {
-		SPDK_ERRLOG("Bad lenght of checksum xattr: %lu\n", value_len);
+		SPDK_ERRLOG("Bad length of checksum xattr: %lu\n", value_len);
 		return -EDOM;
 	}
 
