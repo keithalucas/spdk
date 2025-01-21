@@ -4438,6 +4438,7 @@ blob_thin_prov_rw(void)
 	uint8_t payload_read[10 * 4096];
 	uint8_t payload_write[10 * 4096];
 	uint64_t write_bytes;
+	uint64_t write_zeroes_bytes;
 	uint64_t read_bytes;
 
 	free_clusters = spdk_bs_free_cluster_count(bs);
@@ -4483,6 +4484,7 @@ blob_thin_prov_rw(void)
 	CU_ASSERT(memcmp(zero, payload_read, 10 * 4096) == 0);
 
 	write_bytes = g_dev_write_bytes;
+	write_zeroes_bytes = g_dev_write_zeroes_bytes;
 	read_bytes = g_dev_read_bytes;
 
 	/* Perform write on thread 1. That will allocate cluster on thread 0 via send_msg */
@@ -4506,9 +4508,9 @@ blob_thin_prov_rw(void)
 	 * read 0 bytes */
 	if (g_use_extent_table) {
 		/* Add one more page for EXTENT_PAGE write */
-		CU_ASSERT(g_dev_write_bytes - write_bytes == page_size * 22);
+		CU_ASSERT(((g_dev_write_bytes - write_bytes)-(g_dev_write_zeroes_bytes - write_zeroes_bytes)) == page_size * 22);
 	} else {
-		CU_ASSERT(g_dev_write_bytes - write_bytes == page_size * 21);
+		CU_ASSERT(((g_dev_write_bytes - write_bytes)-(g_dev_write_zeroes_bytes - write_zeroes_bytes)) == page_size * 21);
 	}
 	CU_ASSERT(g_dev_read_bytes - read_bytes == 0);
 
@@ -4542,6 +4544,7 @@ blob_thin_prov_write_count_io(void)
 	uint64_t page_size;
 	uint8_t payload_write[4096];
 	uint64_t write_bytes;
+	uint64_t write_zeroes_bytes;
 	uint64_t read_bytes;
 	const uint32_t CLUSTER_SZ = 16384;
 	uint32_t pages_per_cluster;
@@ -4595,6 +4598,7 @@ blob_thin_prov_write_count_io(void)
 	memset(payload_write, 0, sizeof(payload_write));
 	for (i = 0; i < 8; i++) {
 		write_bytes = g_dev_write_bytes;
+		write_zeroes_bytes = g_dev_write_zeroes_bytes;
 		read_bytes = g_dev_read_bytes;
 
 		g_bserrno = -1;
@@ -4608,19 +4612,20 @@ blob_thin_prov_write_count_io(void)
 			/* For legacy metadata, we should have written two pages - one for the
 			 * write I/O itself, another for the blob's primary metadata.
 			 */
-			CU_ASSERT((g_dev_write_bytes - write_bytes) / page_size == 2);
+			CU_ASSERT(((g_dev_write_bytes - write_bytes)-(g_dev_write_zeroes_bytes - write_zeroes_bytes)) / page_size == 2);
 		} else {
 			/* For extent table metadata, we should have written three pages - one
 			 * for the write I/O, one for the extent page, one for the blob's primary
 			 * metadata.
 			 */
-			CU_ASSERT((g_dev_write_bytes - write_bytes) / page_size == 3);
+			CU_ASSERT(((g_dev_write_bytes - write_bytes)-(g_dev_write_zeroes_bytes - write_zeroes_bytes)) / page_size == 3);
 		}
 
 		/* The write should have synced the metadata already.  Do another sync here
 		 * just to confirm.
 		 */
 		write_bytes = g_dev_write_bytes;
+		write_zeroes_bytes = g_dev_write_zeroes_bytes;
 		read_bytes = g_dev_read_bytes;
 
 		g_bserrno = -1;
@@ -4647,7 +4652,7 @@ blob_thin_prov_write_count_io(void)
 		 * For legacy metadata, we should have written the I/O and the primary metadata page.
 		 * For extent table metadata, we should have written the I/O and the extent metadata page.
 		 */
-		CU_ASSERT((g_dev_write_bytes - write_bytes) / page_size == 2);
+		CU_ASSERT(((g_dev_write_bytes - write_bytes)-(g_dev_write_zeroes_bytes - write_zeroes_bytes)) / page_size == 2);
 
 		/* Send unmap aligned to the whole cluster - should free it up */
 		g_bserrno = -1;
@@ -4937,6 +4942,7 @@ blob_thin_prov_rle(void)
 	uint8_t payload_read[10 * 4096];
 	uint8_t payload_write[10 * 4096];
 	uint64_t write_bytes;
+	uint64_t write_zeroes_bytes;
 	uint64_t read_bytes;
 	uint64_t io_unit;
 
@@ -4965,6 +4971,7 @@ blob_thin_prov_rle(void)
 	CU_ASSERT(memcmp(zero, payload_read, 10 * 4096) == 0);
 
 	write_bytes = g_dev_write_bytes;
+	write_zeroes_bytes = g_dev_write_zeroes_bytes;
 	read_bytes = g_dev_read_bytes;
 
 	/* Issue write to second cluster in a blob */
@@ -4977,9 +4984,9 @@ blob_thin_prov_rle(void)
 	 * read 0 bytes */
 	if (g_use_extent_table) {
 		/* Add one more page for EXTENT_PAGE write */
-		CU_ASSERT(g_dev_write_bytes - write_bytes == page_size * 12);
+		CU_ASSERT(((g_dev_write_bytes - write_bytes)-(g_dev_write_zeroes_bytes - write_zeroes_bytes)) == page_size * 12);
 	} else {
-		CU_ASSERT(g_dev_write_bytes - write_bytes == page_size * 11);
+		CU_ASSERT(((g_dev_write_bytes - write_bytes)-(g_dev_write_zeroes_bytes - write_zeroes_bytes)) == page_size * 11);
 	}
 	CU_ASSERT(g_dev_read_bytes - read_bytes == 0);
 
